@@ -1,24 +1,22 @@
-import { createClient } from "@/app/lib/supabase/server";
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
+
 import { supabaseAdmin } from "@/app/lib/supabase/admin";
 
 /**
  * =========================================================
- * AUTH HELPER
+ * AUTHENTICATION HELPER
  * =========================================================
  *
  * File:
  * app/lib/auth.ts
  *
- * Digunakan untuk:
- * - Login user
- * - Login admin
- * - Login developer
- * - Logout
- * - Cek session
- * - Cek role
- * - Cek status akun
- * - Failed login attempt
- * - Lock akun setelah 5x login gagal
+ * Role:
+ * - user
+ * - admin
+ * - developer
+ *
+ * File ini digunakan di SERVER.
  *
  * =========================================================
  */
@@ -28,35 +26,14 @@ export type UserRole =
   | "admin"
   | "developer";
 
-export type AccountStatus =
-  | "pending"
-  | "active"
-  | "suspended";
-
-
-/**
- * Jumlah maksimal login gagal.
- */
-export const MAX_LOGIN_ATTEMPTS = 5;
-
-
-/**
- * Lama lock akun setelah 5x gagal.
- *
- * 15 menit.
- *
- * Setelah masa lock selesai, percobaan dapat dilakukan lagi.
- */
-export const LOGIN_LOCK_MINUTES = 15;
-
 
 /**
  * =========================================================
- * TYPE
+ * PROFILE TYPE
  * =========================================================
  */
 
-export interface Profile {
+export interface AuthProfile {
   id: string;
 
   username: string | null;
@@ -71,19 +48,15 @@ export interface Profile {
 
   parent_whatsapp: string | null;
 
-  gmail: string | null;
+  email: string | null;
 
   class_level: number | null;
 
-  role: UserRole;
-
-  status: AccountStatus;
-
   avatar_url: string | null;
 
-  failed_login_attempts: number;
+  role: UserRole;
 
-  locked_until: string | null;
+  is_active: boolean;
 
   created_at: string;
 
@@ -93,54 +66,84 @@ export interface Profile {
 
 /**
  * =========================================================
- * AUTH RESULT
+ * SESSION USER
  * =========================================================
  */
 
-export interface AuthResult {
-  success: boolean;
+export interface AuthUser {
+  id: string;
 
-  message: string;
+  email?: string | null;
 
-  userId?: string;
+  role: UserRole;
 
-  role?: UserRole;
-
-  profile?: Profile | null;
-
-  needsApproval?: boolean;
-
-  lockedUntil?: string | null;
+  profile: AuthProfile | null;
 }
 
 
 /**
  * =========================================================
- * NORMALIZE USERNAME
+ * CREATE SERVER SUPABASE CLIENT
+ * =========================================================
+ *
+ * Client ini menggunakan cookie Supabase SSR.
+ *
+ * Berbeda dengan supabaseAdmin:
+ *
+ * createServerSupabaseClient()
+ * -> mengikuti session user
+ *
+ * supabaseAdmin
+ * -> Service Role
+ *
  * =========================================================
  */
 
-export function normalizeUsername(
-  username: string
-) {
-  return username
-    .trim()
-    .toLowerCase();
-}
+export async function createServerSupabaseClient() {
+  const cookieStore =
+    await cookies();
 
+  return createServerClient(
+    process.env
+      .NEXT_PUBLIC_SUPABASE_URL!,
+    process.env
+      .NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        async getAll() {
+          return cookieStore.getAll();
+        },
 
-/**
- * =========================================================
- * NORMALIZE EMAIL
- * =========================================================
- */
-
-export function normalizeEmail(
-  email: string
-) {
-  return email
-    .trim()
-    .toLowerCase();
+        async setAll(
+          cookiesToSet
+        ) {
+          try {
+            cookiesToSet.forEach(
+              ({
+                name,
+                value,
+                options,
+              }) => {
+                cookieStore.set(
+                  name,
+                  value,
+                  options
+                );
+              }
+            );
+          } catch {
+            /**
+             * Server Component mungkin tidak
+             * mengizinkan penulisan cookie.
+             *
+             * Middleware tetap akan menangani
+             * refresh session.
+             */
+          }
+        },
+      },
+    }
+  );
 }
 
 
@@ -152,36 +155,78 @@ export function normalizeEmail(
 
 export async function getAuthUser() {
   const supabase =
-    await createClient();
+    await createServerSupabaseClient();
+
 
   const {
-    data: {
-      user,
-    },
+    data,
     error,
   } =
     await supabase.auth.getUser();
 
+
   if (
     error ||
-    !user
+    !data.user
   ) {
     return null;
   }
 
-  return user;
+
+  return data.user;
 }
 
 
 /**
  * =========================================================
- * GET CURRENT PROFILE
+ * GET CURRENT SESSION
  * =========================================================
  */
 
-export async function getAuthProfile() {
+export async function getAuthSession() {
+  const supabase =
+    await createServerSupabaseClient();
+
+
+  const {
+    data,
+    error,
+  } =
+    await supabase.auth.getSession();
+
+
+  if (
+    error ||
+    !data.session
+  ) {
+    return null;
+  }
+
+
+  return data.session;
+}
+
+
+/**
+ * =========================================================
+ * GET PROFILE
+ * =========================================================
+ *
+ * Profile disimpan di tabel:
+ *
+ * profiles
+ *
+ * bukan di client.
+ *
+ * =========================================================
+ */
+
+export async function getAuthProfile(): Promise<
+  AuthProfile | null
+> {
   const user =
     await getAuthUser();
+
 
   if (!user) {
     return null;
@@ -203,13 +248,11 @@ export async function getAuthProfile() {
           birth_place,
           birth_date,
           parent_whatsapp,
-          gmail,
+          email,
           class_level,
-          role,
-          status,
           avatar_url,
-          failed_login_attempts,
-          locked_until,
+          role,
+          is_active,
           created_at,
           updated_at
         `
@@ -231,184 +274,316 @@ export async function getAuthProfile() {
   }
 
 
-  return data as Profile | null;
+  if (!data) {
+    return null;
+  }
+
+
+  return data as AuthProfile;
 }
 
 
 /**
  * =========================================================
- * GET ROLE
+ * GET AUTH CONTEXT
+ * =========================================================
+ *
+ * Mengembalikan:
+ *
+ * user
+ * profile
+ * role
+ *
+ * sekaligus.
  * =========================================================
  */
 
-export async function getUserRole() {
+export async function getAuthContext(): Promise<{
+  user: AuthUser | null;
+  profile: AuthProfile | null;
+  role: UserRole | null;
+}> {
+  const user =
+    await getAuthUser();
+
+
+  if (!user) {
+    return {
+      user: null,
+      profile: null,
+      role: null,
+    };
+  }
+
+
+  const profile =
+    await getAuthProfile();
+
+
+  const role =
+    profile?.role ??
+    "user";
+
+
+  return {
+    user: {
+      id: user.id,
+
+      email:
+        user.email ??
+        null,
+
+      role,
+
+      profile,
+    },
+
+    profile,
+
+    role,
+  };
+}
+
+
+/**
+ * =========================================================
+ * REQUIRE AUTHENTICATION
+ * =========================================================
+ */
+
+export async function requireAuth() {
+  const context =
+    await getAuthContext();
+
+
+  if (
+    !context.user
+  ) {
+    throw new Error(
+      "AUTH_REQUIRED"
+    );
+  }
+
+
+  return context;
+}
+
+
+/**
+ * =========================================================
+ * REQUIRE ACTIVE ACCOUNT
+ * =========================================================
+ */
+
+export async function requireActiveAuth() {
+  const context =
+    await requireAuth();
+
+
+  if (
+    context.profile &&
+    !context.profile
+      .is_active
+  ) {
+    throw new Error(
+      "ACCOUNT_DISABLED"
+    );
+  }
+
+
+  return context;
+}
+
+
+/**
+ * =========================================================
+ * REQUIRE ROLE
+ * =========================================================
+ */
+
+export async function requireRole(
+  allowedRoles: UserRole[]
+) {
+  const context =
+    await requireActiveAuth();
+
+
+  if (
+    !context.role ||
+    !allowedRoles.includes(
+      context.role
+    )
+  ) {
+    throw new Error(
+      "FORBIDDEN"
+    );
+  }
+
+
+  return context;
+}
+
+
+/**
+ * =========================================================
+ * REQUIRE USER
+ * =========================================================
+ */
+
+export async function requireUser() {
+  return requireRole([
+    "user",
+  ]);
+}
+
+
+/**
+ * =========================================================
+ * REQUIRE ADMIN
+ * =========================================================
+ */
+
+export async function requireAdmin() {
+  return requireRole([
+    "admin",
+    "developer",
+  ]);
+}
+
+
+/**
+ * =========================================================
+ * REQUIRE DEVELOPER
+ * =========================================================
+ */
+
+export async function requireDeveloper() {
+  return requireRole([
+    "developer",
+  ]);
+}
+
+
+/**
+ * =========================================================
+ * ROLE CHECKERS
+ * =========================================================
+ */
+
+export async function isLoggedIn() {
+  const user =
+    await getAuthUser();
+
+  return Boolean(
+    user
+  );
+}
+
+
+export async function isAdmin() {
   const profile =
     await getAuthProfile();
 
   return (
-    profile?.role ??
-    null
+    profile?.role ===
+      "admin" ||
+    profile?.role ===
+      "developer"
   );
 }
 
 
-/**
- * =========================================================
- * ROLE CHECK
- * =========================================================
- */
-
-export async function hasRole(
-  role: UserRole
-) {
-  const currentRole =
-    await getUserRole();
+export async function isDeveloper() {
+  const profile =
+    await getAuthProfile();
 
   return (
-    currentRole ===
-    role
-  );
-}
-
-
-/**
- * =========================================================
- * ADMIN CHECK
- * =========================================================
- */
-
-export async function isAdminUser() {
-  return hasRole(
-    "admin"
-  );
-}
-
-
-/**
- * =========================================================
- * DEVELOPER CHECK
- * =========================================================
- */
-
-export async function isDeveloperUser() {
-  return hasRole(
+    profile?.role ===
     "developer"
   );
 }
 
 
-/**
- * =========================================================
- * ADMIN / DEVELOPER CHECK
- * =========================================================
- */
-
-export async function isStaff() {
-  const role =
-    await getUserRole();
-
-  return (
-    role === "admin" ||
-    role === "developer"
-  );
-}
-
-
-/**
- * =========================================================
- * ACTIVE ACCOUNT CHECK
- * =========================================================
- */
-
-export async function isActiveAccount() {
+export async function isNormalUser() {
   const profile =
     await getAuthProfile();
 
-  if (!profile) {
-    return false;
-  }
-
   return (
-    profile.status ===
-    "active"
+    profile?.role ===
+    "user"
   );
 }
 
 
 /**
  * =========================================================
- * CHECK LOCK STATUS
+ * SIGN OUT
+ * =========================================================
+ *
+ * Biasanya logout dilakukan melalui
+ * Route Handler agar cookie dapat dibersihkan
+ * dengan benar.
+ *
+ * Fungsi ini tetap disediakan untuk server action.
  * =========================================================
  */
 
-export function isAccountLocked(
-  lockedUntil:
-    | string
-    | null
-    | undefined
-) {
-  if (!lockedUntil) {
-    return false;
+export async function signOut() {
+  const supabase =
+    await createServerSupabaseClient();
+
+
+  const {
+    error,
+  } =
+    await supabase.auth.signOut();
+
+
+  if (error) {
+    return {
+      success: false,
+
+      error:
+        error.message,
+    };
   }
 
 
-  const lockedTime =
-    new Date(
-      lockedUntil
-    ).getTime();
+  return {
+    success: true,
+  };
+}
+
+
+/**
+ * =========================================================
+ * GET PROFILE BY ID
+ * =========================================================
+ *
+ * Untuk kebutuhan admin/developer.
+ *
+ * =========================================================
+ */
+
+export async function getProfileById(
+  userId: string
+) {
+  const context =
+    await requireAdmin();
 
 
   if (
-    Number.isNaN(
-      lockedTime
-    )
+    !context.role
   ) {
-    return false;
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Tidak memiliki akses.",
+    };
   }
-
-
-  return (
-    lockedTime >
-    Date.now()
-  );
-}
-
-
-/**
- * =========================================================
- * GET LOCK TIME
- * =========================================================
- */
-
-export function getLockUntil() {
-  const date =
-    new Date(
-      Date.now() +
-        LOGIN_LOCK_MINUTES *
-          60 *
-          1000
-    );
-
-  return date.toISOString();
-}
-
-
-/**
- * =========================================================
- * FIND ACCOUNT BY USERNAME
- * =========================================================
- *
- * Username disimpan pada profiles.
- *
- * Fungsi ini hanya digunakan SERVER-SIDE.
- */
-export async function findProfileByUsername(
-  username: string
-) {
-  const normalized =
-    normalizeUsername(
-      username
-    );
 
 
   const {
@@ -422,672 +597,249 @@ export async function findProfileByUsername(
           id,
           username,
           full_name,
-          gmail,
+          address,
+          birth_place,
+          birth_date,
+          parent_whatsapp,
+          email,
+          class_level,
+          avatar_url,
           role,
-          status,
-          failed_login_attempts,
-          locked_until
+          is_active,
+          created_at,
+          updated_at
         `
       )
       .eq(
-        "username",
-        normalized
+        "id",
+        userId
       )
       .maybeSingle();
 
 
   if (error) {
-    console.error(
-      "findProfileByUsername error:",
-      error
-    );
-
-    return null;
-  }
-
-
-  return data;
-}
-
-
-/**
- * =========================================================
- * INCREMENT FAILED LOGIN
- * =========================================================
- *
- * Dipanggil ketika username/password salah.
- *
- * Setelah 5x gagal:
- * - akun dikunci sementara
- * - failed_login_attempts tetap dicatat
- *
- * Laporan keamanan akan dibuat di helper/report layer
- * berikutnya.
- */
-export async function registerFailedLogin(
-  profileId: string
-) {
-  const {
-    data: profile,
-    error: fetchError,
-  } =
-    await supabaseAdmin
-      .from("profiles")
-      .select(
-        "failed_login_attempts, locked_until"
-      )
-      .eq(
-        "id",
-        profileId
-      )
-      .maybeSingle();
-
-
-  if (fetchError) {
-    throw new Error(
-      `Gagal membaca status login: ${fetchError.message}`
-    );
-  }
-
-
-  if (!profile) {
-    throw new Error(
-      "Profile tidak ditemukan."
-    );
-  }
-
-
-  const currentAttempts =
-    Number(
-      profile.failed_login_attempts ??
-        0
-    );
-
-
-  const nextAttempts =
-    currentAttempts + 1;
-
-
-  /**
-   * Belum mencapai batas.
-   */
-  if (
-    nextAttempts <
-    MAX_LOGIN_ATTEMPTS
-  ) {
-    const {
-      error,
-    } =
-      await supabaseAdmin
-        .from("profiles")
-        .update({
-          failed_login_attempts:
-            nextAttempts,
-        })
-        .eq(
-          "id",
-          profileId
-        );
-
-
-    if (error) {
-      throw new Error(
-        `Gagal mencatat percobaan login: ${error.message}`
-      );
-    }
-
-
     return {
-      attempts:
-        nextAttempts,
+      success: false,
 
-      locked: false,
+      data: null,
 
-      lockedUntil:
-        null,
+      error:
+        error.message,
     };
   }
 
 
-  /**
-   * Mencapai 5x.
-   */
-  const lockedUntil =
-    getLockUntil();
-
-
-  const {
-    error,
-  } =
-    await supabaseAdmin
-      .from("profiles")
-      .update({
-        failed_login_attempts:
-          nextAttempts,
-
-        locked_until:
-          lockedUntil,
-      })
-      .eq(
-        "id",
-        profileId
-      );
-
-
-  if (error) {
-    throw new Error(
-      `Gagal mengunci akun: ${error.message}`
-    );
-  }
-
-
   return {
-    attempts:
-      nextAttempts,
+    success: true,
 
-    locked: true,
-
-    lockedUntil,
+    data:
+      data as AuthProfile | null,
   };
 }
 
 
 /**
  * =========================================================
- * RESET FAILED LOGIN
+ * GET ALL USERS
  * =========================================================
  *
- * Dipanggil setelah login berhasil.
+ * Hanya admin/developer.
+ *
+ * Developer dapat melihat semua role.
+ * Admin tidak melihat developer.
+ *
+ * =========================================================
  */
-export async function resetFailedLogin(
-  profileId: string
-) {
-  const {
-    error,
-  } =
-    await supabaseAdmin
-      .from("profiles")
-      .update({
-        failed_login_attempts:
-          0,
 
-        locked_until:
-          null,
-      })
-      .eq(
-        "id",
-        profileId
+export async function getAllProfiles(
+  options?: {
+    includeAdmins?: boolean;
+    includeDevelopers?: boolean;
+  }
+) {
+  const context =
+    await requireAdmin();
+
+
+  let query =
+    supabaseAdmin
+      .from("profiles")
+      .select(
+        `
+          id,
+          username,
+          full_name,
+          address,
+          birth_place,
+          birth_date,
+          parent_whatsapp,
+          email,
+          class_level,
+          avatar_url,
+          role,
+          is_active,
+          created_at,
+          updated_at
+        `
+      )
+      .order(
+        "created_at",
+        {
+          ascending:
+            false,
+        }
       );
 
 
-  if (error) {
-    throw new Error(
-      `Gagal mereset percobaan login: ${error.message}`
-    );
-  }
-}
-
-
-/**
- * =========================================================
- * LOGIN DENGAN EMAIL
- * =========================================================
- *
- * Supabase Auth secara native menggunakan email/password.
- *
- * Username user/admin/developer nantinya akan dicari
- * melalui profiles terlebih dahulu.
- */
-export async function loginWithEmail(
-  email: string,
-  password: string
-): Promise<AuthResult> {
-  const supabase =
-    await createClient();
-
-
-  const normalizedEmail =
-    normalizeEmail(
-      email
-    );
-
-
   /**
-   * Cari profile.
-   */
-  const {
-    data: profile,
-    error: profileError,
-  } =
-    await supabaseAdmin
-      .from("profiles")
-      .select("*")
-      .eq(
-        "gmail",
-        normalizedEmail
-      )
-      .maybeSingle();
-
-
-  /**
-   * Jangan membocorkan apakah email terdaftar.
+   * Admin:
+   * hanya dapat memantau user.
    */
   if (
-    profileError ||
-    !profile
+    context.role ===
+    "admin"
   ) {
-    return {
-      success: false,
-
-      message:
-        "Username/email atau password salah.",
-    };
+    query =
+      query.eq(
+        "role",
+        "user"
+      );
   }
 
 
   /**
-   * Cek account lock.
+   * Developer:
+   * default melihat user + admin.
+   *
+   * Developer hanya melihat developer jika
+   * explicitly includeDevelopers = true.
    */
   if (
-    isAccountLocked(
-      profile.locked_until
-    )
+    context.role ===
+      "developer" &&
+    options?.includeDevelopers !==
+      true
   ) {
-    return {
-      success: false,
-
-      message:
-        "Akun sedang dikunci sementara karena terlalu banyak percobaan login gagal.",
-
-      lockedUntil:
-        profile.locked_until,
-    };
+    query =
+      query.neq(
+        "role",
+        "developer"
+      );
   }
 
 
-  /**
-   * Cek status.
-   */
   if (
-    profile.status ===
-    "suspended"
+    context.role ===
+      "developer" &&
+    options?.includeAdmins ===
+      false
   ) {
-    return {
-      success: false,
-
-      message:
-        "Akun ini telah dinonaktifkan. Silakan hubungi administrator.",
-    };
+    query =
+      query.neq(
+        "role",
+        "admin"
+      );
   }
 
 
-  /**
-   * Login Supabase.
-   */
   const {
     data,
     error,
   } =
-    await supabase.auth
-      .signInWithPassword({
-        email:
-          normalizedEmail,
-
-        password,
-      });
-
-
-  /**
-   * PASSWORD SALAH
-   */
-  if (
-    error ||
-    !data.user
-  ) {
-    try {
-      const result =
-        await registerFailedLogin(
-          profile.id
-        );
-
-
-      if (
-        result.locked
-      ) {
-        /**
-         * Laporan otomatis akan dibuat oleh
-         * layer report/security berikutnya.
-         */
-        return {
-          success: false,
-
-          message:
-            "Percobaan login gagal mencapai 5 kali. Akun dikunci sementara.",
-
-          lockedUntil:
-            result.lockedUntil,
-        };
-      }
-    } catch (
-      registerError
-    ) {
-      console.error(
-        "Failed login registration error:",
-        registerError
-      );
-    }
-
-
-    return {
-      success: false,
-
-      message:
-        "Username/email atau password salah.",
-    };
-  }
-
-
-  /**
-   * Login berhasil.
-   */
-  await resetFailedLogin(
-    profile.id
-  );
-
-
-  return {
-    success: true,
-
-    message:
-      "Login berhasil.",
-
-    userId:
-      data.user.id,
-
-    role:
-      profile.role as UserRole,
-
-    profile:
-      profile as Profile,
-  };
-}
-
-
-/**
- * =========================================================
- * LOGIN BERDASARKAN ROLE
- * =========================================================
- *
- * Digunakan oleh:
- *
- * /login
- * /login-admin
- * /login-developer
- *
- * Mencegah user biasa login menggunakan
- * halaman admin/developer.
- */
-export async function loginByRole(
-  email: string,
-  password: string,
-  expectedRole: UserRole
-): Promise<AuthResult> {
-  const result =
-    await loginWithEmail(
-      email,
-      password
-    );
-
-
-  if (
-    !result.success
-  ) {
-    return result;
-  }
-
-
-  if (
-    result.role !==
-    expectedRole
-  ) {
-    /**
-     * Logout jika role tidak sesuai.
-     */
-    await logout();
-
-
-    return {
-      success: false,
-
-      message:
-        "Akun ini tidak mempunyai akses ke halaman login tersebut.",
-    };
-  }
-
-
-  return result;
-}
-
-
-/**
- * =========================================================
- * LOGIN USER
- * =========================================================
- */
-
-export async function loginUser(
-  email: string,
-  password: string
-) {
-  return loginByRole(
-    email,
-    password,
-    "user"
-  );
-}
-
-
-/**
- * =========================================================
- * LOGIN ADMIN
- * =========================================================
- */
-
-export async function loginAdmin(
-  email: string,
-  password: string
-) {
-  return loginByRole(
-    email,
-    password,
-    "admin"
-  );
-}
-
-
-/**
- * =========================================================
- * LOGIN DEVELOPER
- * =========================================================
- */
-
-export async function loginDeveloper(
-  email: string,
-  password: string
-) {
-  return loginByRole(
-    email,
-    password,
-    "developer"
-  );
-}
-
-
-/**
- * =========================================================
- * LOGOUT
- * =========================================================
- */
-
-export async function logout() {
-  const supabase =
-    await createClient();
-
-  const {
-    error,
-  } =
-    await supabase.auth
-      .signOut();
+    await query;
 
 
   if (error) {
-    throw new Error(
-      `Gagal logout: ${error.message}`
-    );
+    return {
+      success: false,
+
+      data: [],
+
+      error:
+        error.message,
+    };
   }
 
 
   return {
     success: true,
+
+    data:
+      (data ??
+        []) as AuthProfile[],
   };
 }
 
 
 /**
  * =========================================================
- * REQUIRE ROLE
+ * GET ROLE LABEL
  * =========================================================
- *
- * Helper untuk server-side protection.
- *
- * Contoh:
- *
- * const profile = await requireRole("admin");
- *
- * if (!profile) {
- *   ...
- * }
  */
-export async function requireRole(
+
+export function getRoleLabel(
   role: UserRole
 ) {
-  const profile =
-    await getAuthProfile();
+  switch (role) {
+    case "user":
+      return "User";
 
+    case "admin":
+      return "Admin";
 
-  if (!profile) {
-    return null;
+    case "developer":
+      return "Developer";
+
+    default:
+      return "Unknown";
   }
-
-
-  if (
-    profile.status !==
-    "active"
-  ) {
-    return null;
-  }
-
-
-  if (
-    profile.role !==
-    role
-  ) {
-    return null;
-  }
-
-
-  return profile;
 }
 
 
 /**
  * =========================================================
- * REQUIRE STAFF
+ * SAFE USER INFORMATION
  * =========================================================
  *
- * Admin atau developer.
+ * Digunakan untuk frontend.
+ *
+ * Jangan pernah mengirim password,
+ * service role key, access token, refresh token,
+ * atau informasi sensitif lainnya.
+ * =========================================================
  */
-export async function requireStaff() {
-  const profile =
-    await getAuthProfile();
 
-
+export function sanitizeAuthProfile(
+  profile: AuthProfile | null
+) {
   if (!profile) {
     return null;
   }
 
 
-  if (
-    profile.status !==
-    "active"
-  ) {
-    return null;
-  }
+  return {
+    id:
+      profile.id,
 
+    username:
+      profile.username,
 
-  if (
-    profile.role !==
-      "admin" &&
-    profile.role !==
-      "developer"
-  ) {
-    return null;
-  }
+    fullName:
+      profile.full_name,
 
+    email:
+      profile.email,
 
-  return profile;
+    classLevel:
+      profile.class_level,
+
+    avatarUrl:
+      profile.avatar_url,
+
+    role:
+      profile.role,
+
+    isActive:
+      profile.is_active,
+  };
 }
-
-
-/**
- * =========================================================
- * REQUIRE DEVELOPER
- * =========================================================
- */
-
-export async function requireDeveloper() {
-  return requireRole(
-    "developer"
-  );
-}
-
-
-/**
- * =========================================================
- * REQUIRE ADMIN
- * =========================================================
- */
-
-export async function requireAdmin() {
-  return requireRole(
-    "admin"
-  );
-}
-
-
-/**
- * =========================================================
- * REQUIRE AUTHENTICATED USER
- * =========================================================
- */
-
-export async function requireAuthenticatedUser() {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return null;
-  }
-
-
-  if (
-    profile.status !==
-    "active"
-  ) {
-    return null;
-  }
-
-
-  return profile;
-    }
