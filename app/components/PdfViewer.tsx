@@ -8,28 +8,13 @@ import {
 } from "react";
 
 
-/**
- * =========================================================
- * TYPES
- * =========================================================
- */
-
 interface PdfViewerProps {
   bookId: string;
-
   title?: string;
-
   downloadAllowed?: boolean;
-
   className?: string;
 }
 
-
-/**
- * =========================================================
- * COMPONENT
- * =========================================================
- */
 
 export default function PdfViewer({
   bookId,
@@ -38,14 +23,10 @@ export default function PdfViewer({
   className = "",
 }: PdfViewerProps) {
   const iframeRef =
-    useRef<HTMLIFrameElement | null>(
-      null
-    );
+    useRef<HTMLIFrameElement | null>(null);
 
   const viewerContainerRef =
-    useRef<HTMLDivElement | null>(
-      null
-    );
+    useRef<HTMLDivElement | null>(null);
 
 
   const [loading, setLoading] =
@@ -58,28 +39,34 @@ export default function PdfViewer({
     useState(false);
 
 
-  /**
-   * -------------------------------------------------------
-   * VIEW URL
-   * -------------------------------------------------------
+  /*
+   * ========================================================
+   * URL
+   * ========================================================
+   *
+   * Viewer:
+   * /api/books/[id]/view
+   *
+   * Download:
+   * /api/books/[id]/download
    */
 
   const viewUrl =
-    `/api/books/view?bookId=${encodeURIComponent(
+    `/api/books/${encodeURIComponent(
       bookId
-    )}`;
+    )}/view`;
 
 
   const downloadUrl =
-    `/api/books/download?bookId=${encodeURIComponent(
+    `/api/books/${encodeURIComponent(
       bookId
-    )}`;
+    )}/download`;
 
 
-  /**
-   * -------------------------------------------------------
+  /*
+   * ========================================================
    * IFRAME LOAD
-   * -------------------------------------------------------
+   * ========================================================
    */
 
   const handleLoad =
@@ -89,10 +76,10 @@ export default function PdfViewer({
     }, []);
 
 
-  /**
-   * -------------------------------------------------------
+  /*
+   * ========================================================
    * IFRAME ERROR
-   * -------------------------------------------------------
+   * ========================================================
    */
 
   const handleError =
@@ -102,10 +89,10 @@ export default function PdfViewer({
     }, []);
 
 
-  /**
-   * -------------------------------------------------------
+  /*
+   * ========================================================
    * FULLSCREEN CHANGE
-   * -------------------------------------------------------
+   * ========================================================
    */
 
   useEffect(() => {
@@ -134,10 +121,10 @@ export default function PdfViewer({
   }, []);
 
 
-  /**
-   * -------------------------------------------------------
-   * TOGGLE FULLSCREEN
-   * -------------------------------------------------------
+  /*
+   * ========================================================
+   * FULLSCREEN
+   * ========================================================
    */
 
   const toggleFullscreen =
@@ -146,9 +133,7 @@ export default function PdfViewer({
         viewerContainerRef.current;
 
 
-      if (
-        !element
-      ) {
+      if (!element) {
         return;
       }
 
@@ -158,15 +143,12 @@ export default function PdfViewer({
           document.fullscreenElement
         ) {
           await document.exitFullscreen();
-
           return;
         }
 
 
         await element.requestFullscreen();
-      } catch (
-        fullscreenError
-      ) {
+      } catch (fullscreenError) {
         console.error(
           "[PDF_VIEWER] fullscreen error:",
           fullscreenError
@@ -175,10 +157,10 @@ export default function PdfViewer({
     };
 
 
-  /**
-   * -------------------------------------------------------
+  /*
+   * ========================================================
    * RELOAD
-   * -------------------------------------------------------
+   * ========================================================
    */
 
   const reloadViewer =
@@ -191,17 +173,10 @@ export default function PdfViewer({
         iframeRef.current;
 
 
-      if (
-        !iframe
-      ) {
+      if (!iframe) {
         return;
       }
 
-
-      /**
-       * Tambahkan cache-buster agar browser
-       * benar-benar meminta ulang PDF.
-       */
 
       const separator =
         viewUrl.includes("?")
@@ -214,20 +189,19 @@ export default function PdfViewer({
     };
 
 
-  /**
-   * -------------------------------------------------------
-   * INVALID BOOK ID
-   * -------------------------------------------------------
+  /*
+   * ========================================================
+   * INVALID ID
+   * ========================================================
    */
 
-  if (
-    !bookId
-  ) {
+  if (!bookId) {
     return (
       <section
         className={`pdf-viewer-wrapper ${className}`}
       >
         <div className="pdf-viewer-error">
+
           <div className="pdf-error-icon">
             ⚠️
           </div>
@@ -239,16 +213,17 @@ export default function PdfViewer({
           <p>
             ID buku tidak valid.
           </p>
+
         </div>
       </section>
     );
   }
 
 
-  /**
-   * -------------------------------------------------------
+  /*
+   * ========================================================
    * RENDER
-   * -------------------------------------------------------
+   * ========================================================
    */
 
   return (
@@ -261,9 +236,9 @@ export default function PdfViewer({
       } ${className}`}
     >
 
-      {/* ===================================================
+      {/* ==================================================
           TOOLBAR
-          =================================================== */}
+          ================================================== */}
 
       <div className="pdf-viewer-toolbar">
 
@@ -279,10 +254,6 @@ export default function PdfViewer({
 
 
         <div className="pdf-toolbar-right">
-
-          {/* -----------------------------------------------
-              DOWNLOAD
-              ----------------------------------------------- */}
 
           {downloadAllowed && (
             <a
@@ -302,15 +273,9 @@ export default function PdfViewer({
           )}
 
 
-          {/* -----------------------------------------------
-              RELOAD
-              ----------------------------------------------- */}
-
           <button
             type="button"
-            onClick={
-              reloadViewer
-            }
+            onClick={reloadViewer}
             className="pdf-toolbar-button"
             title="Muat ulang PDF"
           >
@@ -324,15 +289,9 @@ export default function PdfViewer({
           </button>
 
 
-          {/* -----------------------------------------------
-              FULLSCREEN
-              ----------------------------------------------- */}
-
           <button
             type="button"
-            onClick={
-              toggleFullscreen
-            }
+            onClick={toggleFullscreen}
             className="pdf-toolbar-button"
             title={
               fullscreen
@@ -358,15 +317,11 @@ export default function PdfViewer({
       </div>
 
 
-      {/* ===================================================
+      {/* ==================================================
           VIEWER
-          =================================================== */}
+          ================================================== */}
 
       <div className="pdf-viewer-content">
-
-        {/* -----------------------------------------------
-            LOADING
-            ----------------------------------------------- */}
 
         {loading && (
           <div className="pdf-viewer-loading">
@@ -384,10 +339,6 @@ export default function PdfViewer({
           </div>
         )}
 
-
-        {/* -----------------------------------------------
-            ERROR
-            ----------------------------------------------- */}
 
         {error && (
           <div className="pdf-viewer-error">
@@ -407,9 +358,7 @@ export default function PdfViewer({
 
             <button
               type="button"
-              onClick={
-                reloadViewer
-              }
+              onClick={reloadViewer}
               className="pdf-retry-button"
             >
               Coba lagi
@@ -418,10 +367,6 @@ export default function PdfViewer({
           </div>
         )}
 
-
-        {/* -----------------------------------------------
-            IFRAME
-            ----------------------------------------------- */}
 
         <iframe
           ref={iframeRef}
@@ -432,37 +377,18 @@ export default function PdfViewer({
               ? "pdf-iframe-hidden"
               : ""
           }`}
-          onLoad={
-            handleLoad
-          }
-          onError={
-            handleError
-          }
-
-          /**
-           * Permission browser.
-           *
-           * fullscreen diperlukan agar PDF viewer
-           * dapat menggunakan fullscreen.
-           */
-
+          onLoad={handleLoad}
+          onError={handleError}
           allow="fullscreen"
-
-          /**
-           * Tidak menggunakan sandbox karena PDF
-           * browser viewer membutuhkan kemampuan
-           * tertentu untuk bekerja normal.
-           */
-
           loading="eager"
         />
 
       </div>
 
 
-      {/* ===================================================
+      {/* ==================================================
           READ ONLY NOTICE
-          =================================================== */}
+          ================================================== */}
 
       {!downloadAllowed && (
         <div className="pdf-readonly-notice">
@@ -480,10 +406,6 @@ export default function PdfViewer({
       )}
 
 
-      {/* ===================================================
-          STYLE
-          =================================================== */}
-
       <style
         dangerouslySetInnerHTML={{
           __html: `
@@ -492,30 +414,15 @@ export default function PdfViewer({
               display: flex;
               flex-direction: column;
               width: 100%;
-              height: min(
-                82vh,
-                1050px
-              );
+              height: min(82vh, 1050px);
               min-height: 620px;
               overflow: hidden;
-              border:
-                1px solid
-                rgba(
-                  255,
-                  255,
-                  255,
-                  0.09
-                );
+              border: 1px solid rgba(255,255,255,.09);
               border-radius: 18px;
               background: #111217;
               box-shadow:
                 0 25px 80px
-                rgba(
-                  0,
-                  0,
-                  0,
-                  0.35
-                );
+                rgba(0,0,0,.35);
             }
 
             .pdf-viewer-fullscreen {
@@ -538,19 +445,9 @@ export default function PdfViewer({
               padding: 7px 10px 7px 15px;
               border-bottom:
                 1px solid
-                rgba(
-                  255,
-                  255,
-                  255,
-                  0.07
-                );
+                rgba(255,255,255,.07);
               background:
-                rgba(
-                  15,
-                  16,
-                  21,
-                  0.96
-                );
+                rgba(15,16,21,.96);
               backdrop-filter:
                 blur(16px);
             }
@@ -570,12 +467,7 @@ export default function PdfViewer({
               background: #57e39b;
               box-shadow:
                 0 0 10px
-                rgba(
-                  87,
-                  227,
-                  155,
-                  0.65
-                );
+                rgba(87,227,155,.65);
             }
 
             .pdf-viewer-title {
@@ -603,20 +495,10 @@ export default function PdfViewer({
               padding: 0 11px;
               border:
                 1px solid
-                rgba(
-                  255,
-                  255,
-                  255,
-                  0.08
-                );
+                rgba(255,255,255,.08);
               border-radius: 9px;
               background:
-                rgba(
-                  255,
-                  255,
-                  255,
-                  0.045
-                );
+                rgba(255,255,255,.045);
               color: #d7d7dd;
               font-family: inherit;
               font-size: 12px;
@@ -624,26 +506,16 @@ export default function PdfViewer({
               text-decoration: none;
               cursor: pointer;
               transition:
-                background 0.18s ease,
-                border-color 0.18s ease,
-                transform 0.18s ease;
+                background .18s ease,
+                border-color .18s ease,
+                transform .18s ease;
             }
 
             .pdf-toolbar-button:hover {
               background:
-                rgba(
-                  255,
-                  255,
-                  255,
-                  0.09
-                );
+                rgba(255,255,255,.09);
               border-color:
-                rgba(
-                  255,
-                  255,
-                  255,
-                  0.14
-                );
+                rgba(255,255,255,.14);
             }
 
             .pdf-toolbar-button:active {
@@ -687,8 +559,7 @@ export default function PdfViewer({
               justify-content: center;
               flex-direction: column;
               padding: 30px;
-              background:
-                #292a30;
+              background: #292a30;
               text-align: center;
             }
 
@@ -709,26 +580,16 @@ export default function PdfViewer({
               height: 30px;
               border:
                 3px solid
-                rgba(
-                  255,
-                  255,
-                  255,
-                  0.12
-                );
-              border-top-color:
-                #8c73ff;
+                rgba(255,255,255,.12);
+              border-top-color: #8c73ff;
               border-radius: 50%;
               animation:
-                pdfSpin
-                0.8s
-                linear
-                infinite;
+                pdfSpin .8s linear infinite;
             }
 
             @keyframes pdfSpin {
               to {
-                transform:
-                  rotate(360deg);
+                transform: rotate(360deg);
               }
             }
 
@@ -776,19 +637,9 @@ export default function PdfViewer({
               padding: 0 12px;
               border-top:
                 1px solid
-                rgba(
-                  255,
-                  255,
-                  255,
-                  0.06
-                );
+                rgba(255,255,255,.06);
               background:
-                rgba(
-                  255,
-                  190,
-                  70,
-                  0.035
-                );
+                rgba(255,190,70,.035);
               color: #9e9ea7;
               font-size: 11px;
             }
@@ -797,9 +648,7 @@ export default function PdfViewer({
               font-size: 12px;
             }
 
-            @media (
-              max-width: 650px
-            ) {
+            @media (max-width: 650px) {
               .pdf-viewer-wrapper {
                 height: 75vh;
                 min-height: 520px;
@@ -827,9 +676,7 @@ export default function PdfViewer({
               }
             }
 
-            @media (
-              max-width: 400px
-            ) {
+            @media (max-width: 400px) {
               .pdf-viewer-wrapper {
                 min-height: 480px;
               }
@@ -844,4 +691,4 @@ export default function PdfViewer({
 
     </section>
   );
-          }
+}
