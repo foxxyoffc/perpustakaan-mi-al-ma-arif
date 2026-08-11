@@ -1,41 +1,56 @@
-import { createServerClient } from "@supabase/ssr";
-import { NextResponse } from "next/server";
-import type { NextRequest } from "next/server";
+import {
+  type NextRequest,
+  NextResponse,
+} from "next/server";
+
+import {
+  createServerClient,
+} from "@supabase/ssr";
 
 /**
  * =========================================================
- * MI AL-MA'ARIF NUSANTARA
- * LIBRARY WEBSITE - MIDDLEWARE
+ * NEXT.JS MIDDLEWARE
  * =========================================================
  *
  * File:
  * middleware.ts
  *
+ * Lokasi:
+ * ROOT PROJECT
+ *
+ * Contoh:
+ *
+ * /middleware.ts
+ *
+ * BUKAN:
+ *
+ * /app/middleware.ts
+ *
+ * =========================================================
+ *
  * Fungsi:
+ *
  * - Refresh session Supabase
- * - Mengecek login
- * - Membatasi halaman berdasarkan role
+ * - Menjaga authentication cookie
  * - Melindungi halaman user
  * - Melindungi halaman admin
  * - Melindungi halaman developer
+ * - Mencegah user biasa masuk area admin
+ * - Mencegah admin masuk area developer
  *
- * ROLE:
- * - user
- * - admin
- * - developer
- *
- * CATATAN:
- * Middleware bukan satu-satunya lapisan keamanan.
- * Semua API/server action tetap wajib melakukan
- * pengecekan authentication + authorization.
  * =========================================================
  */
 
 
 /**
- * Halaman yang boleh dibuka tanpa login.
+ * =========================================================
+ * PUBLIC ROUTES
+ * =========================================================
+ *
+ * Halaman yang dapat dibuka tanpa login.
  */
-const PUBLIC_PATHS = [
+
+const PUBLIC_ROUTES = [
   "/",
   "/home",
   "/login",
@@ -47,198 +62,113 @@ const PUBLIC_PATHS = [
   "/sign-in",
   "/about-us",
   "/contact-us",
+];
+
+
+/**
+ * =========================================================
+ * PUBLIC PREFIXES
+ * =========================================================
+ *
+ * Digunakan untuk asset/public endpoint tertentu.
+ */
+
+const PUBLIC_PREFIXES = [
+  "/_next",
+  "/favicon.ico",
+  "/images",
+  "/icons",
+  "/api/public",
+];
+
+
+/**
+ * =========================================================
+ * USER ONLY ROUTES
+ * =========================================================
+ *
+ * Memerlukan login user/admin/developer.
+ */
+
+const USER_PROTECTED_PREFIXES = [
+  "/category",
+  "/history",
+  "/my-account",
+  "/report",
   "/announcement",
 ];
 
 
 /**
- * Prefix halaman yang membutuhkan login user.
+ * =========================================================
+ * ADMIN ROUTES
+ * =========================================================
  *
- * User biasa juga dapat mengakses beberapa halaman
- * milik admin/developer? TIDAK.
+ * Hanya:
+ *
+ * - admin
+ * - developer
+ *
+ * yang dapat masuk.
  */
-const AUTHENTICATED_PATHS = [
-  "/category",
-  "/history",
-  "/my-account",
-  "/report",
-];
 
-
-/**
- * Halaman khusus admin.
- */
-const ADMIN_PATHS = [
-  "/admin",
-  "/admin/set-web",
-  "/admin/reports",
-  "/admin/history",
-];
-
-
-/**
- * Halaman khusus developer.
- */
-const DEVELOPER_PATHS = [
-  "/developer",
-  "/developer/set-web",
-  "/developer/monitoring",
-  "/developer/reports",
-  "/developer/history",
-];
-
-
-/**
- * Halaman yang dapat diakses admin DAN developer.
- */
-const ADMIN_DEVELOPER_PATHS = [
-  "/reports",
+const ADMIN_PREFIXES = [
   "/history-all",
+  "/request-all-report",
+  "/set-web",
 ];
 
 
 /**
- * Mengecek apakah pathname sama dengan path
- * atau merupakan child route dari path tersebut.
+ * =========================================================
+ * DEVELOPER ROUTES
+ * =========================================================
  *
- * Contoh:
- *
- * /admin
- * /admin/books
- * /admin/books/add
- *
- * semuanya dianggap bagian dari /admin.
+ * Hanya developer.
  */
-function matchesPath(
+
+const DEVELOPER_PREFIXES = [
+  "/set-web/developer",
+  "/developer",
+];
+
+
+/**
+ * =========================================================
+ * HELPERS
+ * =========================================================
+ */
+
+function matchesExact(
   pathname: string,
-  path: string
+  routes: string[]
 ) {
-  return (
-    pathname === path ||
-    pathname.startsWith(`${path}/`)
+  return routes.includes(
+    pathname
   );
 }
 
 
-/**
- * Mengecek beberapa path sekaligus.
- */
-function matchesAnyPath(
+function matchesPrefix(
   pathname: string,
-  paths: string[]
+  prefixes: string[]
 ) {
-  return paths.some((path) =>
-    matchesPath(pathname, path)
-  );
-}
-
-
-/**
- * Mengecek apakah route merupakan file/static resource.
- */
-function isStaticFile(
-  pathname: string
-) {
-  return /\.[^/]+$/.test(pathname);
-}
-
-
-/**
- * Membuat redirect ke login user.
- */
-function redirectToLogin(
-  request: NextRequest
-) {
-  const url =
-    request.nextUrl.clone();
-
-  url.pathname = "/login";
-
-  /**
-   * Simpan halaman sebelumnya supaya setelah login
-   * user dapat diarahkan kembali.
-   */
-  url.searchParams.set(
-    "redirect",
-    request.nextUrl.pathname +
-      request.nextUrl.search
-  );
-
-  return NextResponse.redirect(
-    url
-  );
-}
-
-
-/**
- * Redirect ketika user tidak mempunyai izin.
- */
-function redirectForbidden(
-  request: NextRequest
-) {
-  const url =
-    request.nextUrl.clone();
-
-  /**
-   * Untuk sementara diarahkan ke home.
-   *
-   * Nanti bisa kita buat halaman /403 khusus.
-   */
-  url.pathname = "/home";
-
-  url.search = "";
-
-  return NextResponse.redirect(
-    url
-  );
-}
-
-
-/**
- * Redirect admin ke dashboard admin.
- */
-function redirectAdmin(
-  request: NextRequest
-) {
-  const url =
-    request.nextUrl.clone();
-
-  url.pathname =
-    "/admin/set-web";
-
-  url.search = "";
-
-  return NextResponse.redirect(
-    url
-  );
-}
-
-
-/**
- * Redirect developer ke dashboard developer.
- */
-function redirectDeveloper(
-  request: NextRequest
-) {
-  const url =
-    request.nextUrl.clone();
-
-  url.pathname =
-    "/developer/set-web";
-
-  url.search = "";
-
-  return NextResponse.redirect(
-    url
+  return prefixes.some(
+    (prefix) =>
+      pathname === prefix ||
+      pathname.startsWith(
+        `${prefix}/`
+      )
   );
 }
 
 
 /**
  * =========================================================
- * MAIN MIDDLEWARE
+ * MIDDLEWARE
  * =========================================================
  */
+
 export async function middleware(
   request: NextRequest
 ) {
@@ -247,48 +177,53 @@ export async function middleware(
 
 
   /**
-   * Jangan proses:
-   *
-   * - _next
-   * - favicon
-   * - static files
-   * - images
-   * - robots
-   * - sitemap
+   * -------------------------------------------------------
+   * PUBLIC FILE / ASSET
+   * -------------------------------------------------------
    */
+
   if (
-    pathname.startsWith(
-      "/_next"
-    ) ||
-    pathname ===
-      "/favicon.ico" ||
-    pathname ===
-      "/robots.txt" ||
-    pathname ===
-      "/sitemap.xml" ||
-    isStaticFile(pathname)
+    matchesPrefix(
+      pathname,
+      PUBLIC_PREFIXES
+    )
   ) {
     return NextResponse.next();
   }
 
 
   /**
-   * Response awal.
+   * -------------------------------------------------------
+   * API
+   * -------------------------------------------------------
    *
-   * Supabase akan menggunakan response ini
-   * untuk memperbarui cookie session jika diperlukan.
+   * API yang membutuhkan authentication
+   * tetap melakukan pengecekan sendiri.
+   *
+   * Middleware hanya melewatkan request.
    */
+
+  if (
+    pathname.startsWith(
+      "/api/"
+    )
+  ) {
+    return NextResponse.next();
+  }
+
+
+  /**
+   * -------------------------------------------------------
+   * CREATE SUPABASE SERVER CLIENT
+   * -------------------------------------------------------
+   */
+
   let response =
     NextResponse.next({
       request,
     });
 
 
-  /**
-   * =======================================================
-   * SUPABASE SERVER CLIENT
-   * =======================================================
-   */
   const supabase =
     createServerClient(
       process.env
@@ -308,20 +243,27 @@ export async function middleware(
               ({
                 name,
                 value,
-                options,
               }) => {
                 request.cookies.set(
                   name,
                   value
                 );
+              }
+            );
 
-                response =
-                  NextResponse.next(
-                    {
-                      request,
-                    }
-                  );
 
+            response =
+              NextResponse.next({
+                request,
+              });
+
+
+            cookiesToSet.forEach(
+              ({
+                name,
+                value,
+                options,
+              }) => {
                 response.cookies.set(
                   name,
                   value,
@@ -336,13 +278,14 @@ export async function middleware(
 
 
   /**
-   * =======================================================
-   * AMBIL USER
-   * =======================================================
+   * -------------------------------------------------------
+   * GET USER
+   * -------------------------------------------------------
    *
-   * getUser() digunakan karena Supabase dapat
-   * memverifikasi user pada server.
+   * getUser() digunakan agar session
+   * benar-benar divalidasi oleh Supabase.
    */
+
   const {
     data: {
       user,
@@ -352,384 +295,253 @@ export async function middleware(
 
 
   /**
-   * =======================================================
-   * ROUTE PUBLIC
-   * =======================================================
+   * -------------------------------------------------------
+   * PUBLIC ROUTE
+   * -------------------------------------------------------
    */
-  const isPublic =
-    matchesAnyPath(
-      pathname,
-      PUBLIC_PATHS
-    );
 
-
-  /**
-   * =======================================================
-   * API ROUTE
-   * =======================================================
-   *
-   * API tidak kita blokir secara umum di middleware.
-   *
-   * Setiap API nanti akan melakukan:
-   *
-   * - getUser()
-   * - cek role
-   * - cek permission
-   *
-   * sendiri.
-   *
-   * Ini penting agar endpoint seperti:
-   *
-   * /api/admin/books
-   *
-   * tetap memiliki authorization yang benar.
-   */
   if (
-    pathname.startsWith(
-      "/api/"
+    matchesExact(
+      pathname,
+      PUBLIC_ROUTES
     )
   ) {
+    /**
+     * Kalau sudah login lalu membuka
+     * halaman login, arahkan ke Home.
+     *
+     * Namun login-admin dan login-developer
+     * tetap boleh dibuka agar role-specific
+     * login tetap tersedia.
+     */
+
+    if (
+      user &&
+      (
+        pathname ===
+          "/login" ||
+        pathname ===
+          "/sign-in"
+      )
+    ) {
+      return NextResponse.redirect(
+        new URL(
+          "/home",
+          request.url
+        )
+      );
+    }
+
+
     return response;
   }
 
 
   /**
-   * =======================================================
-   * PUBLIC PAGE
-   * =======================================================
-   *
-   * Kalau belum login dan halaman public,
-   * langsung lanjut.
+   * -------------------------------------------------------
+   * USER PROTECTED
+   * -------------------------------------------------------
    */
+
   if (
-    isPublic &&
-    !user
-  ) {
-    return response;
-  }
-
-
-  /**
-   * =======================================================
-   * USER BELUM LOGIN
-   * =======================================================
-   *
-   * Semua halaman yang bukan public membutuhkan
-   * authentication.
-   */
-  if (!user) {
-    return redirectToLogin(
-      request
-    );
-  }
-
-
-  /**
-   * =======================================================
-   * AMBIL PROFILE / ROLE
-   * =======================================================
-   *
-   * Profile berada di:
-   *
-   * public.profiles
-   *
-   * Role:
-   * user
-   * admin
-   * developer
-   */
-  const {
-    data: profile,
-  } =
-    await supabase
-      .from("profiles")
-      .select(
-        "id, role, status"
-      )
-      .eq(
-        "id",
-        user.id
-      )
-      .maybeSingle();
-
-
-  /**
-   * Tidak mempunyai profile.
-   *
-   * Ini biasanya berarti akun belum selesai
-   * diproses atau data profile bermasalah.
-   */
-  if (!profile) {
-    /**
-     * Login page tetap boleh dibuka.
-     */
-    if (
-      pathname ===
-        "/login" ||
-      pathname ===
-        "/login/forgot-password"
-    ) {
-      return response;
-    }
-
-    return redirectToLogin(
-      request
-    );
-  }
-
-
-  /**
-   * =======================================================
-   * STATUS AKUN
-   * =======================================================
-   *
-   * Untuk user yang pendaftarannya masih menunggu
-   * persetujuan admin, status dapat berupa:
-   *
-   * pending
-   *
-   * Untuk akun yang dinonaktifkan:
-   *
-   * suspended
-   *
-   * Akun active:
-   *
-   * active
-   */
-  const accountStatus =
-    profile.status;
-
-
-  /**
-   * =======================================================
-   * PENDING ACCOUNT
-   * =======================================================
-   *
-   * User yang belum disetujui admin tidak boleh
-   * masuk ke area perpustakaan.
-   */
-  if (
-    accountStatus ===
-      "pending"
-  ) {
-    /**
-     * Biarkan halaman login dan sign-in.
-     */
-    if (
-      pathname ===
-        "/login" ||
-      pathname ===
-        "/sign-in" ||
-      pathname ===
-        "/login/forgot-password"
-    ) {
-      return response;
-    }
-
-
-    /**
-     * Nanti kita bisa membuat:
-     *
-     * /account-pending
-     *
-     * untuk halaman khusus.
-     *
-     * Untuk sementara kembali ke login.
-     */
-    return redirectToLogin(
-      request
-    );
-  }
-
-
-  /**
-   * =======================================================
-   * SUSPENDED ACCOUNT
-   * =======================================================
-   */
-  if (
-    accountStatus ===
-    "suspended"
-  ) {
-    if (
-      pathname ===
-        "/login" ||
-      pathname ===
-        "/login/forgot-password"
-    ) {
-      return response;
-    }
-
-    return redirectToLogin(
-      request
-    );
-  }
-
-
-  /**
-   * =======================================================
-   * ADMIN-ONLY ROUTES
-   * =======================================================
-   */
-  if (
-    matchesAnyPath(
+    matchesPrefix(
       pathname,
-      ADMIN_PATHS
+      USER_PROTECTED_PREFIXES
     )
   ) {
-    if (
-      profile.role !==
-      "admin"
-    ) {
-      /**
-       * Developer juga memiliki akses administratif,
-       * tetapi developer diarahkan ke area developer
-       * agar pemisahan role tetap jelas.
-       */
-      if (
-        profile.role ===
-        "developer"
-      ) {
-        return redirectDeveloper(
-          request
+    if (!user) {
+      const loginUrl =
+        new URL(
+          "/login",
+          request.url
         );
-      }
 
-      return redirectForbidden(
-        request
+
+      loginUrl.searchParams.set(
+        "redirect",
+        pathname
+      );
+
+
+      return NextResponse.redirect(
+        loginUrl
       );
     }
-
-
-    return response;
   }
 
 
   /**
-   * =======================================================
-   * DEVELOPER-ONLY ROUTES
-   * =======================================================
+   * -------------------------------------------------------
+   * GET ROLE
+   * -------------------------------------------------------
+   *
+   * Role disimpan pada profiles.
+   *
+   * Middleware menggunakan Service Role
+   * tidak diperbolehkan.
+   *
+   * Karena itu role diambil melalui metadata
+   * user terlebih dahulu.
+   *
+   * Sistem database/RLS tetap menjadi
+   * lapisan authorization utama.
+   * -------------------------------------------------------
    */
-  if (
-    matchesAnyPath(
-      pathname,
-      DEVELOPER_PATHS
-    )
-  ) {
+
+  let role:
+    | "user"
+    | "admin"
+    | "developer"
+    | null =
+    null;
+
+
+  if (user) {
+    const metadataRole =
+      user.user_metadata
+        ?.role;
+
+
     if (
-      profile.role !==
-      "developer"
-    ) {
-      return redirectForbidden(
-        request
-      );
-    }
-
-
-    return response;
-  }
-
-
-  /**
-   * =======================================================
-   * ADMIN + DEVELOPER ROUTES
-   * =======================================================
-   */
-  if (
-    matchesAnyPath(
-      pathname,
-      ADMIN_DEVELOPER_PATHS
-    )
-  ) {
-    if (
-      profile.role !==
-        "admin" &&
-      profile.role !==
+      metadataRole ===
+        "user" ||
+      metadataRole ===
+        "admin" ||
+      metadataRole ===
         "developer"
     ) {
-      return redirectForbidden(
-        request
-      );
+      role =
+        metadataRole;
     }
-
-
-    return response;
   }
 
 
   /**
-   * =======================================================
-   * USER AUTHENTICATED ROUTES
-   * =======================================================
-   *
-   * User, admin, dan developer dapat mengakses
-   * halaman umum yang membutuhkan login.
+   * -------------------------------------------------------
+   * ADMIN ROUTES
+   * -------------------------------------------------------
    */
+
   if (
-    matchesAnyPath(
+    matchesPrefix(
       pathname,
-      AUTHENTICATED_PATHS
+      ADMIN_PREFIXES
     )
   ) {
-    return response;
+    /**
+     * Belum login.
+     */
+
+    if (!user) {
+      const loginUrl =
+        new URL(
+          "/login",
+          request.url
+        );
+
+
+      loginUrl.searchParams.set(
+        "redirect",
+        pathname
+      );
+
+
+      return NextResponse.redirect(
+        loginUrl
+      );
+    }
+
+
+    /**
+     * Bukan admin/developer.
+     */
+
+    if (
+      role !== "admin" &&
+      role !== "developer"
+    ) {
+      return NextResponse.redirect(
+        new URL(
+          "/home",
+          request.url
+        )
+      );
+    }
   }
 
 
   /**
-   * =======================================================
-   * LOGIN REDIRECT
-   * =======================================================
-   *
-   * Kalau user yang sudah login membuka:
-   *
-   * /login
-   * /login-admin
-   * /login-developer
-   *
-   * kita arahkan sesuai role.
+   * -------------------------------------------------------
+   * DEVELOPER ROUTES
+   * -------------------------------------------------------
    */
+
   if (
-    pathname ===
-      "/login" ||
-    pathname ===
-      "/login-admin" ||
-    pathname ===
-      "/login-developer"
+    matchesPrefix(
+      pathname,
+      DEVELOPER_PREFIXES
+    )
   ) {
+    /**
+     * Belum login.
+     */
+
+    if (!user) {
+      const loginUrl =
+        new URL(
+          "/login-developer",
+          request.url
+        );
+
+
+      loginUrl.searchParams.set(
+        "redirect",
+        pathname
+      );
+
+
+      return NextResponse.redirect(
+        loginUrl
+      );
+    }
+
+
+    /**
+     * Hanya developer.
+     */
+
     if (
-      profile.role ===
+      role !==
       "developer"
     ) {
-      return redirectDeveloper(
-        request
+      return NextResponse.redirect(
+        new URL(
+          "/home",
+          request.url
+        )
       );
     }
-
-
-    if (
-      profile.role ===
-      "admin"
-    ) {
-      return redirectAdmin(
-        request
-      );
-    }
-
-
-    return NextResponse.redirect(
-      new URL(
-        "/home",
-        request.url
-      )
-    );
   }
 
 
   /**
-   * =======================================================
-   * DEFAULT
-   * =======================================================
+   * -------------------------------------------------------
+   * LOGIN ROLE REDIRECT
+   * -------------------------------------------------------
+   *
+   * Jika developer membuka halaman login biasa,
+   * tidak otomatis mengubah session.
+   *
+   * Login page tetap menangani authentication.
    */
+
+
+  /**
+   * -------------------------------------------------------
+   * RETURN RESPONSE
+   * -------------------------------------------------------
+   */
+
   return response;
 }
 
@@ -739,21 +551,25 @@ export async function middleware(
  * MATCHER
  * =========================================================
  *
- * Middleware hanya dijalankan untuk halaman yang relevan.
+ * Middleware dijalankan pada halaman aplikasi,
+ * tetapi tidak perlu diproses untuk file statis
+ * tertentu.
  *
- * API sengaja ikut di-match agar session cookie tetap
- * dapat diperbarui, tetapi API authorization tetap
- * dilakukan di masing-masing route handler.
+ * =========================================================
  */
+
 export const config = {
   matcher: [
     /*
-     * Semua route kecuali:
+     * Cocokkan semua request kecuali:
+     *
      * - _next/static
      * - _next/image
      * - favicon
-     * - file static tertentu
+     * - file gambar umum
+     * - file metadata
      */
-    "/((?!_next/static|_next/image|favicon.ico).*)",
+
+    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|css|js|map)$).*)",
   ],
 };
