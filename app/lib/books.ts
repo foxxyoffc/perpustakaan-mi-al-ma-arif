@@ -1,77 +1,52 @@
-import { supabaseAdmin } from "@/app/lib/supabase/admin";
-import { getAuthProfile } from "@/app/lib/auth";
 import {
-  historyBookCreated,
-  historyBookDeleted,
-  historyBookPdfDeleted,
-  historyBookPdfReplaced,
-  historyBookPdfUploaded,
-  historyBookUpdated,
-  historyBookViewed,
-  historyBookDownloaded,
-  historyDownloadPermissionChanged,
-} from "@/app/lib/history";
+  createDownloadSignedUrl,
+  createStorageSignedUrl,
+  deleteBookPdf,
+  deleteBookStorageFolder,
+  replaceBookPdf,
+  uploadBookCover,
+  uploadBookPdf,
+  validatePdfFile,
+} from "@/app/lib/storage";
 
-import type { UserRole } from "@/app/lib/permissions";
+import {
+  requireAdmin,
+  requireAuth,
+} from "@/app/lib/auth";
 
-/**
- * =========================================================
- * BOOK MANAGEMENT
- * =========================================================
- *
- * File:
- * app/lib/books.ts
- *
- * Menangani:
- *
- * - Buku Siswa
- * - Buku Guru
- * - Buku Umum
- * - Buku PAI/Agama
- * - Kelas 1 - 6
- * - Judul
- * - Sinopsis
- * - Cover
- * - PDF
- * - Preview PDF di website
- * - Permission download
- * - Tambah/edit/hapus buku
- *
- * PDF TIDAK harus didownload untuk dibaca.
- *
- * Jika allow_download = false:
- * - user tetap dapat membuka PDF
- * - user tidak diberikan tombol download
- *
- * Jika allow_download = true:
- * - user dapat membaca PDF
- * - user dapat mendownload PDF
- *
- * =========================================================
- */
+import {
+  canManageBooks,
+  canChangeDownloadPermission,
+} from "@/app/lib/permissions";
+
+import {
+  supabaseAdmin,
+} from "@/app/lib/supabase/admin";
 
 
 /**
  * =========================================================
- * TYPES
+ * BOOK TYPES
  * =========================================================
  */
 
-export type BookCategory =
-  | "siswa_umum"
-  | "siswa_pai"
-  | "guru_kelas_1"
-  | "guru_kelas_2"
-  | "guru_kelas_3"
-  | "guru_kelas_4"
-  | "guru_kelas_5"
-  | "guru_kelas_6";
+export type BookAudience =
+  | "student"
+  | "teacher";
 
 
-export type BookStatus =
-  | "active"
-  | "hidden"
-  | "archived";
+export type StudentBookCategory =
+  | "general"
+  | "religion";
+
+
+export type TeacherClass =
+  | 1
+  | 2
+  | 3
+  | 4
+  | 5
+  | 6;
 
 
 export interface Book {
@@ -79,17 +54,27 @@ export interface Book {
 
   title: string;
 
+  slug: string | null;
+
   synopsis: string | null;
 
-  category: BookCategory;
-
-  cover_url: string | null;
+  cover_path: string | null;
 
   pdf_path: string | null;
 
   allow_download: boolean;
 
-  status: BookStatus;
+  audience: BookAudience;
+
+  student_category:
+    | StudentBookCategory
+    | null;
+
+  teacher_class:
+    | TeacherClass
+    | null;
+
+  is_active: boolean;
 
   created_at: string;
 
@@ -97,37 +82,18 @@ export interface Book {
 }
 
 
-export interface CreateBookInput {
-  title: string;
+/**
+ * =========================================================
+ * BOOK VIEW RESULT
+ * =========================================================
+ */
 
-  synopsis?: string | null;
+export interface BookPdfResult {
+  success: boolean;
 
-  category: BookCategory;
+  url: string | null;
 
-  coverUrl?: string | null;
-
-  pdfPath?: string | null;
-
-  allowDownload?: boolean;
-
-  status?: BookStatus;
-}
-
-
-export interface UpdateBookInput {
-  title?: string;
-
-  synopsis?: string | null;
-
-  category?: BookCategory;
-
-  coverUrl?: string | null;
-
-  pdfPath?: string | null;
-
-  allowDownload?: boolean;
-
-  status?: BookStatus;
+  error?: string;
 }
 
 
@@ -137,283 +103,212 @@ export interface UpdateBookInput {
  * =========================================================
  */
 
-export const STUDENT_CATEGORIES: BookCategory[] = [
-  "siswa_umum",
-  "siswa_pai",
-];
-
-
-export const TEACHER_CATEGORIES: BookCategory[] = [
-  "guru_kelas_1",
-  "guru_kelas_2",
-  "guru_kelas_3",
-  "guru_kelas_4",
-  "guru_kelas_5",
-  "guru_kelas_6",
-];
-
-
-export const ALL_BOOK_CATEGORIES: BookCategory[] = [
-  ...STUDENT_CATEGORIES,
-  ...TEACHER_CATEGORIES,
-];
-
-
-export const CATEGORY_LABELS: Record<
-  BookCategory,
-  string
-> = {
-  siswa_umum:
-    "Buku Siswa - Buku Umum",
-
-  siswa_pai:
-    "Buku Siswa - PAI / Agama",
-
-  guru_kelas_1:
-    "Buku Guru - Kelas 1",
-
-  guru_kelas_2:
-    "Buku Guru - Kelas 2",
-
-  guru_kelas_3:
-    "Buku Guru - Kelas 3",
-
-  guru_kelas_4:
-    "Buku Guru - Kelas 4",
-
-  guru_kelas_5:
-    "Buku Guru - Kelas 5",
-
-  guru_kelas_6:
-    "Buku Guru - Kelas 6",
-};
+const BOOK_SELECT = `
+  id,
+  title,
+  slug,
+  synopsis,
+  cover_path,
+  pdf_path,
+  allow_download,
+  audience,
+  student_category,
+  teacher_class,
+  is_active,
+  created_at,
+  updated_at
+`;
 
 
 /**
  * =========================================================
- * VALIDATION
+ * HELPERS
  * =========================================================
  */
 
-function isValidCategory(
-  category: string
-): category is BookCategory {
-  return ALL_BOOK_CATEGORIES.includes(
-    category as BookCategory
-  );
+function cleanString(
+  value: unknown
+) {
+  if (
+    typeof value !==
+    "string"
+  ) {
+    return "";
+  }
+
+  return value.trim();
 }
 
 
-function validateBookInput(
-  input: CreateBookInput
-): string | null {
-  if (
-    !input.title ||
-    input.title.trim().length < 2
-  ) {
-    return "Judul buku wajib diisi.";
-  }
-
-  if (
-    input.title.trim().length > 200
-  ) {
-    return "Judul buku terlalu panjang.";
-  }
-
-  if (
-    !isValidCategory(
-      input.category
+function createSlug(
+  title: string
+) {
+  return title
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(
+      /[\u0300-\u036f]/g,
+      ""
     )
-  ) {
-    return "Kategori buku tidak valid.";
-  }
-
-  if (
-    input.synopsis &&
-    input.synopsis.length > 10000
-  ) {
-    return "Sinopsis terlalu panjang.";
-  }
-
-  return null;
+    .replace(
+      /[^a-z0-9]+/g,
+      "-"
+    )
+    .replace(
+      /^-+|-+$/g,
+      ""
+    )
+    .substring(
+      0,
+      120
+    );
 }
 
 
 /**
  * =========================================================
- * ACCESS CONTROL
- * =========================================================
- *
- * User:
- * - boleh membaca Buku Siswa
- * - TIDAK boleh membaca Buku Guru
- *
- * Admin:
- * - dapat mengelola buku sesuai sistem
- *
- * Developer:
- * - dapat mengelola seluruh buku
- */
-
-async function requireBookManager() {
-  const profile =
-    await getAuthProfile();
-
-  if (!profile) {
-    return {
-      allowed: false,
-      profile: null,
-      error: "Silakan login terlebih dahulu.",
-    };
-  }
-
-  const role =
-    profile.role as UserRole;
-
-  if (
-    role !== "admin" &&
-    role !== "developer"
-  ) {
-    return {
-      allowed: false,
-      profile,
-      error:
-        "Anda tidak memiliki akses untuk mengelola buku.",
-    };
-  }
-
-  return {
-    allowed: true,
-    profile,
-    error: null,
-  };
-}
-
-
-/**
- * =========================================================
- * GET BOOKS
+ * VALIDATE BOOK DATA
  * =========================================================
  */
 
-export async function getBooks(
-  options?: {
-    category?: BookCategory | null;
+function validateBookData(
+  input: {
+    title?: string;
 
-    search?: string | null;
+    synopsis?: string;
 
-    includeHidden?: boolean;
+    audience?: BookAudience;
 
-    page?: number;
+    studentCategory?:
+      | StudentBookCategory
+      | null;
 
-    limit?: number;
+    teacherClass?:
+      | TeacherClass
+      | null;
   }
 ) {
-  const page = Math.max(
-    1,
-    options?.page ?? 1
-  );
+  const title =
+    cleanString(
+      input.title
+    );
 
-  const limit = Math.min(
-    100,
-    Math.max(
-      1,
-      options?.limit ?? 20
-    )
-  );
-
-  const from =
-    (page - 1) * limit;
-
-  const to =
-    from + limit - 1;
-
-  let query =
-    supabaseAdmin
-      .from("books")
-      .select(
-        "*",
-        {
-          count: "exact",
-        }
-      )
-      .order(
-        "created_at",
-        {
-          ascending: false,
-        }
-      )
-      .range(
-        from,
-        to
-      );
-
-  /**
-   * Secara default hanya buku aktif.
-   */
   if (
-    !options?.includeHidden
+    title.length <
+    1
   ) {
-    query =
-      query.eq(
-        "status",
-        "active"
-      );
+    return {
+      valid: false,
+
+      error:
+        "Judul buku wajib diisi.",
+    };
   }
 
+
   if (
-    options?.category
+    title.length >
+    255
   ) {
-    query =
-      query.eq(
-        "category",
-        options.category
-      );
+    return {
+      valid: false,
+
+      error:
+        "Judul buku maksimal 255 karakter.",
+    };
   }
 
-  if (
-    options?.search
-  ) {
-    const search =
-      options.search
-        .trim()
-        .replace(
-          /[%_]/g,
-          ""
-        );
 
-    if (search) {
-      query =
-        query.ilike(
-          "title",
-          `%${search}%`
-        );
+  const synopsis =
+    cleanString(
+      input.synopsis
+    );
+
+
+  if (
+    synopsis.length >
+    10000
+  ) {
+    return {
+      valid: false,
+
+      error:
+        "Sinopsis terlalu panjang.",
+    };
+  }
+
+
+  if (
+    input.audience !==
+      "student" &&
+    input.audience !==
+      "teacher"
+  ) {
+    return {
+      valid: false,
+
+      error:
+        "Kategori buku tidak valid.",
+    };
+  }
+
+
+  if (
+    input.audience ===
+    "student"
+  ) {
+    if (
+      input.studentCategory !==
+        "general" &&
+      input.studentCategory !==
+        "religion"
+    ) {
+      return {
+        valid: false,
+
+        error:
+          "Kategori Buku Siswa tidak valid.",
+      };
     }
   }
 
-  const {
-    data,
-    count,
-    error,
-  } = await query;
 
-  if (error) {
-    return {
-      success: false,
-      data: [],
-      total: 0,
-      error: error.message,
-    };
+  if (
+    input.audience ===
+    "teacher"
+  ) {
+    const classLevel =
+      Number(
+        input.teacherClass
+      );
+
+
+    if (
+      ![
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+      ].includes(
+        classLevel
+      )
+    ) {
+      return {
+        valid: false,
+
+        error:
+          "Kelas Buku Guru harus 1 sampai 6.",
+      };
+    }
   }
 
+
   return {
-    success: true,
-    data:
-      (data ?? []) as Book[],
-    total:
-      count ?? 0,
-    page,
-    limit,
+    valid: true,
+
+    error: null,
   };
 }
 
@@ -427,64 +322,266 @@ export async function getBooks(
 export async function getBookById(
   bookId: string
 ) {
+  if (
+    !bookId
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Book ID tidak valid.",
+    };
+  }
+
+
   const {
     data,
     error,
   } =
     await supabaseAdmin
       .from("books")
-      .select("*")
+      .select(
+        BOOK_SELECT
+      )
       .eq(
         "id",
         bookId
       )
+      .eq(
+        "is_active",
+        true
+      )
       .maybeSingle();
+
 
   if (error) {
     return {
       success: false,
+
       data: null,
-      error: error.message,
+
+      error:
+        error.message,
     };
   }
+
 
   if (!data) {
     return {
       success: false,
+
       data: null,
-      error: "Buku tidak ditemukan.",
+
+      error:
+        "Buku tidak ditemukan.",
     };
   }
 
+
   return {
     success: true,
-    data: data as Book,
+
+    data:
+      data as Book,
   };
 }
 
 
 /**
  * =========================================================
- * GET BOOKS BY CATEGORY
+ * GET ALL BOOKS
  * =========================================================
  */
 
-export async function getBooksByCategory(
-  category: BookCategory,
-  options?: {
-    search?: string | null;
-    page?: number;
-    limit?: number;
+export async function getBooks(
+  filters?: {
+    audience?:
+      | BookAudience;
+
+    studentCategory?:
+      | StudentBookCategory;
+
+    teacherClass?:
+      | TeacherClass;
+
+    search?: string;
+
+    includeInactive?: boolean;
   }
 ) {
+  const context =
+    await requireAuth();
+
+
+  let query =
+    supabaseAdmin
+      .from("books")
+      .select(
+        BOOK_SELECT
+      )
+      .order(
+        "created_at",
+        {
+          ascending:
+            false,
+        }
+      );
+
+
+  /**
+   * Normal user hanya melihat
+   * buku aktif.
+   *
+   * Admin/developer dapat melihat
+   * buku inactive ketika diminta.
+   */
+
+  if (
+    !filters?.includeInactive ||
+    (
+      context.role !==
+        "admin" &&
+      context.role !==
+        "developer"
+    )
+  ) {
+    query =
+      query.eq(
+        "is_active",
+        true
+      );
+  }
+
+
+  if (
+    filters?.audience
+  ) {
+    query =
+      query.eq(
+        "audience",
+        filters.audience
+      );
+  }
+
+
+  if (
+    filters?.studentCategory
+  ) {
+    query =
+      query.eq(
+        "student_category",
+        filters.studentCategory
+      );
+  }
+
+
+  if (
+    filters?.teacherClass
+  ) {
+    query =
+      query.eq(
+        "teacher_class",
+        filters.teacherClass
+      );
+  }
+
+
+  const search =
+    cleanString(
+      filters?.search
+    );
+
+
+  if (search) {
+    query =
+      query.ilike(
+        "title",
+        `%${search}%`
+      );
+  }
+
+
+  const {
+    data,
+    error,
+  } =
+    await query;
+
+
+  if (error) {
+    return {
+      success: false,
+
+      data: [],
+
+      error:
+        error.message,
+    };
+  }
+
+
+  return {
+    success: true,
+
+    data:
+      (data ??
+        []) as Book[],
+  };
+}
+
+
+/**
+ * =========================================================
+ * GET STUDENT BOOKS
+ * =========================================================
+ */
+
+export async function getStudentBooks(
+  category?:
+    | StudentBookCategory
+) {
   return getBooks({
-    category,
-    search:
-      options?.search ?? null,
-    page:
-      options?.page ?? 1,
-    limit:
-      options?.limit ?? 20,
+    audience:
+      "student",
+
+    studentCategory:
+      category,
+  });
+}
+
+
+/**
+ * =========================================================
+ * GET TEACHER BOOKS
+ * =========================================================
+ */
+
+export async function getTeacherBooks(
+  teacherClass?:
+    | TeacherClass
+) {
+  return getBooks({
+    audience:
+      "teacher",
+
+    teacherClass,
+  });
+}
+
+
+/**
+ * =========================================================
+ * SEARCH BOOKS
+ * =========================================================
+ */
+
+export async function searchBooks(
+  search: string
+) {
+  return getBooks({
+    search,
   });
 }
 
@@ -493,34 +590,117 @@ export async function getBooksByCategory(
  * =========================================================
  * CREATE BOOK
  * =========================================================
+ *
+ * Admin + Developer.
+ *
+ * PDF optional saat membuat data buku.
+ * Setelah data dibuat, PDF dapat diupload.
+ * =========================================================
  */
 
 export async function createBook(
-  input: CreateBookInput
-) {
-  const access =
-    await requireBookManager();
+  input: {
+    title: string;
 
-  if (!access.allowed) {
+    synopsis?: string;
+
+    audience: BookAudience;
+
+    studentCategory?:
+      | StudentBookCategory
+      | null;
+
+    teacherClass?:
+      | TeacherClass
+      | null;
+
+    allowDownload?: boolean;
+  }
+) {
+  const context =
+    await requireAdmin();
+
+
+  if (
+    !canManageBooks(
+      context.role
+    )
+  ) {
     return {
       success: false,
+
+      data: null,
+
       error:
-        access.error ??
-        "Tidak memiliki akses.",
+        "Anda tidak memiliki izin mengelola buku.",
     };
   }
 
+
   const validation =
-    validateBookInput(
+    validateBookData(
       input
     );
 
-  if (validation) {
+
+  if (
+    !validation.valid
+  ) {
     return {
       success: false,
-      error: validation,
+
+      data: null,
+
+      error:
+        validation.error ??
+        "Data buku tidak valid.",
     };
   }
+
+
+  const title =
+    cleanString(
+      input.title
+    );
+
+
+  const synopsis =
+    cleanString(
+      input.synopsis
+    );
+
+
+  let slug =
+    createSlug(
+      title
+    );
+
+
+  /**
+   * Pastikan slug unik.
+   */
+
+  const {
+    data:
+      existingSlug,
+  } =
+    await supabaseAdmin
+      .from("books")
+      .select("id")
+      .eq(
+        "slug",
+        slug
+      )
+      .maybeSingle();
+
+
+  if (
+    existingSlug
+  ) {
+    slug =
+      `${slug}-${Date.now()}`;
+  }
+
 
   const {
     data,
@@ -529,50 +709,59 @@ export async function createBook(
     await supabaseAdmin
       .from("books")
       .insert({
-        title:
-          input.title.trim(),
+        title,
+
+        slug,
 
         synopsis:
-          input.synopsis?.trim() ??
+          synopsis ||
           null,
 
-        category:
-          input.category,
+        audience:
+          input.audience,
 
-        cover_url:
-          input.coverUrl ??
-          null,
+        student_category:
+          input.audience ===
+          "student"
+            ? input.studentCategory
+            : null,
 
-        pdf_path:
-          input.pdfPath ??
-          null,
+        teacher_class:
+          input.audience ===
+          "teacher"
+            ? input.teacherClass
+            : null,
 
         allow_download:
           input.allowDownload ??
           true,
 
-        status:
-          input.status ??
-          "active",
+        is_active:
+          true,
       })
-      .select("*")
+      .select(
+        BOOK_SELECT
+      )
       .single();
+
 
   if (error) {
     return {
       success: false,
-      error: error.message,
+
+      data: null,
+
+      error:
+        error.message,
     };
   }
 
-  await historyBookCreated(
-    data.id,
-    data.title
-  );
 
   return {
     success: true,
-    data: data as Book,
+
+    data:
+      data as Book,
   };
 }
 
@@ -585,104 +774,264 @@ export async function createBook(
 
 export async function updateBook(
   bookId: string,
-  input: UpdateBookInput
+  input: {
+    title?: string;
+
+    synopsis?: string;
+
+    audience?:
+      | BookAudience;
+
+    studentCategory?:
+      | StudentBookCategory
+      | null;
+
+    teacherClass?:
+      | TeacherClass
+      | null;
+
+    allowDownload?: boolean;
+
+    isActive?: boolean;
+  }
 ) {
-  const access =
-    await requireBookManager();
+  const context =
+    await requireAdmin();
 
-  if (!access.allowed) {
-    return {
-      success: false,
-      error:
-        access.error ??
-        "Tidak memiliki akses.",
-    };
-  }
 
   if (
-    input.title !== undefined &&
-    (
-      !input.title.trim() ||
-      input.title.trim().length < 2
+    !canManageBooks(
+      context.role
     )
   ) {
     return {
       success: false,
+
+      data: null,
+
       error:
-        "Judul buku tidak valid.",
+        "Anda tidak memiliki izin mengelola buku.",
     };
   }
 
+
   if (
-    input.category !== undefined &&
-    !isValidCategory(
-      input.category
-    )
+    !bookId
   ) {
     return {
       success: false,
+
+      data: null,
+
       error:
-        "Kategori buku tidak valid.",
+        "Book ID tidak valid.",
     };
   }
+
+
+  const current =
+    await getBookById(
+      bookId
+    );
+
+
+  if (
+    !current.success ||
+    !current.data
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        current.error ??
+        "Buku tidak ditemukan.",
+    };
+  }
+
+
+  const currentBook =
+    current.data;
+
+
+  const nextAudience =
+    input.audience ??
+    currentBook.audience;
+
+
+  const nextStudentCategory =
+    input.studentCategory !==
+      undefined
+      ? input.studentCategory
+      : currentBook.student_category;
+
+
+  const nextTeacherClass =
+    input.teacherClass !==
+      undefined
+      ? input.teacherClass
+      : currentBook.teacher_class;
+
+
+  const validation =
+    validateBookData({
+      title:
+        input.title ??
+        currentBook.title,
+
+      synopsis:
+        input.synopsis ??
+        currentBook.synopsis ??
+        "",
+
+      audience:
+        nextAudience,
+
+      studentCategory:
+        nextStudentCategory,
+
+      teacherClass:
+        nextTeacherClass,
+    });
+
+
+  if (
+    !validation.valid
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        validation.error ??
+        "Data buku tidak valid.",
+    };
+  }
+
 
   const updateData: Record<
     string,
     unknown
   > = {};
 
-  if (
-    input.title !== undefined
-  ) {
-    updateData.title =
-      input.title.trim();
-  }
 
   if (
-    input.synopsis !== undefined
+    input.title !==
+    undefined
+  ) {
+    const title =
+      cleanString(
+        input.title
+      );
+
+
+    updateData.title =
+      title;
+
+
+    updateData.slug =
+      createSlug(
+        title
+      );
+  }
+
+
+  if (
+    input.synopsis !==
+    undefined
   ) {
     updateData.synopsis =
-      input.synopsis?.trim() ??
+      cleanString(
+        input.synopsis
+      ) ||
       null;
   }
 
-  if (
-    input.category !== undefined
-  ) {
-    updateData.category =
-      input.category;
-  }
 
   if (
-    input.coverUrl !== undefined
+    input.audience !==
+    undefined
   ) {
-    updateData.cover_url =
-      input.coverUrl;
+    updateData.audience =
+      input.audience;
+
+
+    if (
+      input.audience ===
+      "student"
+    ) {
+      updateData.teacher_class =
+        null;
+    }
+
+
+    if (
+      input.audience ===
+      "teacher"
+    ) {
+      updateData.student_category =
+        null;
+    }
   }
 
-  if (
-    input.pdfPath !== undefined
-  ) {
-    updateData.pdf_path =
-      input.pdfPath;
-  }
 
   if (
-    input.allowDownload !== undefined
+    input.studentCategory !==
+    undefined
   ) {
+    updateData.student_category =
+      input.studentCategory;
+  }
+
+
+  if (
+    input.teacherClass !==
+    undefined
+  ) {
+    updateData.teacher_class =
+      input.teacherClass;
+  }
+
+
+  if (
+    input.allowDownload !==
+    undefined
+  ) {
+    if (
+      !canChangeDownloadPermission(
+        context.role
+      )
+    ) {
+      return {
+        success: false,
+
+        data: null,
+
+        error:
+          "Anda tidak memiliki izin mengubah izin download.",
+      };
+    }
+
+
     updateData.allow_download =
       input.allowDownload;
   }
 
+
   if (
-    input.status !== undefined
+    input.isActive !==
+    undefined
   ) {
-    updateData.status =
-      input.status;
+    updateData.is_active =
+      input.isActive;
   }
+
 
   updateData.updated_at =
     new Date().toISOString();
+
 
   const {
     data,
@@ -697,144 +1046,30 @@ export async function updateBook(
         "id",
         bookId
       )
-      .select("*")
+      .select(
+        BOOK_SELECT
+      )
       .single();
+
 
   if (error) {
     return {
       success: false,
-      error: error.message,
+
+      data: null,
+
+      error:
+        error.message,
     };
   }
 
-  await historyBookUpdated(
-    bookId,
-    `Memperbarui buku "${data.title}".`
-  );
 
   return {
     success: true,
-    data: data as Book,
+
+    data:
+      data as Book,
   };
-}
-
-
-/**
- * =========================================================
- * UPDATE BOOK TITLE
- * =========================================================
- */
-
-export async function updateBookTitle(
-  bookId: string,
-  title: string
-) {
-  return updateBook(
-    bookId,
-    {
-      title,
-    }
-  );
-}
-
-
-/**
- * =========================================================
- * UPDATE BOOK SYNOPSIS
- * =========================================================
- */
-
-export async function updateBookSynopsis(
-  bookId: string,
-  synopsis: string
-) {
-  return updateBook(
-    bookId,
-    {
-      synopsis,
-    }
-  );
-}
-
-
-/**
- * =========================================================
- * UPDATE BOOK CATEGORY
- * =========================================================
- */
-
-export async function updateBookCategory(
-  bookId: string,
-  category: BookCategory
-) {
-  return updateBook(
-    bookId,
-    {
-      category,
-    }
-  );
-}
-
-
-/**
- * =========================================================
- * UPDATE PDF PATH
- * =========================================================
- *
- * Fungsi ini hanya mengubah referensi PDF.
- *
- * Upload file sebenarnya dilakukan oleh
- * app/lib/storage.ts.
- */
-
-export async function updateBookPdfPath(
-  bookId: string,
-  pdfPath: string
-) {
-  const existing =
-    await getBookById(
-      bookId
-    );
-
-  if (
-    !existing.success ||
-    !existing.data
-  ) {
-    return existing;
-  }
-
-  const hadPdf =
-    Boolean(
-      existing.data.pdf_path
-    );
-
-  const result =
-    await updateBook(
-      bookId,
-      {
-        pdfPath,
-      }
-    );
-
-  if (
-    !result.success
-  ) {
-    return result;
-  }
-
-  if (hadPdf) {
-    await historyBookPdfReplaced(
-      bookId,
-      result.data?.title
-    );
-  } else {
-    await historyBookPdfUploaded(
-      bookId,
-      result.data?.title
-    );
-  }
-
-  return result;
 }
 
 
@@ -847,37 +1082,75 @@ export async function updateBookPdfPath(
 export async function deleteBook(
   bookId: string
 ) {
-  const access =
-    await requireBookManager();
+  const context =
+    await requireAdmin();
 
-  if (!access.allowed) {
-    return {
-      success: false,
-      error:
-        access.error ??
-        "Tidak memiliki akses.",
-    };
-  }
-
-  const existing =
-    await getBookById(
-      bookId
-    );
 
   if (
-    !existing.success ||
-    !existing.data
+    !canManageBooks(
+      context.role
+    )
   ) {
     return {
       success: false,
+
       error:
-        existing.error ??
+        "Anda tidak memiliki izin menghapus buku.",
+    };
+  }
+
+
+  const {
+    data:
+      book,
+    error:
+      fetchError,
+  } =
+    await supabaseAdmin
+      .from("books")
+      .select(
+        `
+          id,
+          pdf_path,
+          cover_path
+        `
+      )
+      .eq(
+        "id",
+        bookId
+      )
+      .maybeSingle();
+
+
+  if (
+    fetchError
+  ) {
+    return {
+      success: false,
+
+      error:
+        fetchError.message,
+    };
+  }
+
+
+  if (!book) {
+    return {
+      success: false,
+
+      error:
         "Buku tidak ditemukan.",
     };
   }
 
+
+  /**
+   * Hapus record database terlebih dahulu.
+   */
+
   const {
-    error,
+    error:
+      deleteError,
   } =
     await supabaseAdmin
       .from("books")
@@ -887,17 +1160,38 @@ export async function deleteBook(
         bookId
       );
 
-  if (error) {
+
+  if (
+    deleteError
+  ) {
     return {
       success: false,
-      error: error.message,
+
+      error:
+        deleteError.message,
     };
   }
 
-  await historyBookDeleted(
-    bookId,
-    existing.data.title
-  );
+
+  /**
+   * Bersihkan file Storage.
+   */
+
+  const cleanup =
+    await deleteBookStorageFolder(
+      bookId
+    );
+
+
+  if (
+    !cleanup.success
+  ) {
+    console.error(
+      "Book storage cleanup error:",
+      cleanup.error
+    );
+  }
+
 
   return {
     success: true,
@@ -907,111 +1201,132 @@ export async function deleteBook(
 
 /**
  * =========================================================
- * ARCHIVE BOOK
- * =========================================================
- *
- * Alternatif lebih aman daripada menghapus.
- */
-
-export async function archiveBook(
-  bookId: string
-) {
-  return updateBook(
-    bookId,
-    {
-      status:
-        "archived",
-    }
-  );
-}
-
-
-/**
- * =========================================================
- * HIDE BOOK
+ * UPLOAD BOOK PDF
  * =========================================================
  */
 
-export async function hideBook(
-  bookId: string
-) {
-  return updateBook(
-    bookId,
-    {
-      status:
-        "hidden",
-    }
-  );
-}
-
-
-/**
- * =========================================================
- * SHOW BOOK
- * =========================================================
- */
-
-export async function showBook(
-  bookId: string
-) {
-  return updateBook(
-    bookId,
-    {
-      status:
-        "active",
-    }
-  );
-}
-
-
-/**
- * =========================================================
- * DOWNLOAD PERMISSION
- * =========================================================
- */
-
-export async function setDownloadPermission(
+export async function uploadPdfToBook(
   bookId: string,
-  allowed: boolean
+  file: File
 ) {
-  const access =
-    await requireBookManager();
+  const context =
+    await requireAdmin();
 
-  if (!access.allowed) {
-    return {
-      success: false,
-      error:
-        access.error ??
-        "Tidak memiliki akses.",
-    };
-  }
-
-  const existing =
-    await getBookById(
-      bookId
-    );
 
   if (
-    !existing.success ||
-    !existing.data
+    !canManageBooks(
+      context.role
+    )
   ) {
     return {
       success: false,
+
       error:
-        existing.error ??
+        "Anda tidak memiliki izin mengupload PDF.",
+    };
+  }
+
+
+  const validation =
+    validatePdfFile(
+      file
+    );
+
+
+  if (
+    !validation.valid
+  ) {
+    return {
+      success: false,
+
+      error:
+        validation.error ??
+        "PDF tidak valid.",
+    };
+  }
+
+
+  const {
+    data:
+      book,
+    error:
+      fetchError,
+  } =
+    await supabaseAdmin
+      .from("books")
+      .select(
+        `
+          id,
+          pdf_path
+        `
+      )
+      .eq(
+        "id",
+        bookId
+      )
+      .maybeSingle();
+
+
+  if (
+    fetchError
+  ) {
+    return {
+      success: false,
+
+      error:
+        fetchError.message,
+    };
+  }
+
+
+  if (!book) {
+    return {
+      success: false,
+
+      error:
         "Buku tidak ditemukan.",
     };
   }
 
+
+  /**
+   * Upload PDF baru.
+   *
+   * PDF lama otomatis dihapus setelah
+   * upload baru berhasil.
+   */
+
+  const result =
+    await replaceBookPdf(
+      file,
+      bookId,
+      book.pdf_path
+    );
+
+
+  if (
+    !result.success ||
+    !result.path
+  ) {
+    return {
+      success: false,
+
+      error:
+        result.error ??
+        "Gagal mengupload PDF.",
+    };
+  }
+
+
   const {
-    data,
-    error,
+    error:
+      updateError,
   } =
     await supabaseAdmin
       .from("books")
       .update({
-        allow_download:
-          allowed,
+        pdf_path:
+          result.path,
 
         updated_at:
           new Date().toISOString(),
@@ -1019,349 +1334,156 @@ export async function setDownloadPermission(
       .eq(
         "id",
         bookId
-      )
-      .select("*")
-      .single();
-
-  if (error) {
-    return {
-      success: false,
-      error: error.message,
-    };
-  }
-
-  await historyDownloadPermissionChanged(
-    bookId,
-    allowed,
-    existing.data.title
-  );
-
-  return {
-    success: true,
-    data: data as Book,
-  };
-}
-
-
-/**
- * =========================================================
- * GET PDF ACCESS
- * =========================================================
- *
- * PENTING:
- *
- * Fungsi ini tidak otomatis mendownload PDF.
- *
- * Tujuannya adalah menghasilkan URL sementara
- * untuk ditampilkan di PDF viewer/browser.
- *
- * allow_download HANYA mengatur tombol download.
- *
- * Jadi:
- *
- * allow_download = false
- * -> PDF tetap bisa dibaca
- * -> tombol download tidak diberikan
- *
- * allow_download = true
- * -> PDF bisa dibaca
- * -> tombol download diberikan
- *
- * =========================================================
- */
-
-export async function getBookPdfAccess(
-  bookId: string
-) {
-  const profile =
-    await getAuthProfile();
-
-  if (!profile) {
-    return {
-      success: false,
-      previewUrl: null,
-      downloadUrl: null,
-      allowDownload: false,
-      error:
-        "Silakan login terlebih dahulu.",
-    };
-  }
-
-  const result =
-    await getBookById(
-      bookId
-    );
-
-  if (
-    !result.success ||
-    !result.data
-  ) {
-    return {
-      success: false,
-      previewUrl: null,
-      downloadUrl: null,
-      allowDownload: false,
-      error:
-        result.error ??
-        "Buku tidak ditemukan.",
-    };
-  }
-
-  const book =
-    result.data;
-
-  /**
-   * Buku harus mempunyai PDF.
-   */
-  if (
-    !book.pdf_path
-  ) {
-    return {
-      success: false,
-      previewUrl: null,
-      downloadUrl: null,
-      allowDownload:
-        book.allow_download,
-      error:
-        "File PDF buku belum tersedia.",
-    };
-  }
-
-  /**
-   * User biasa hanya boleh membuka
-   * Buku Siswa.
-   *
-   * Buku Guru khusus guru/admin/developer.
-   */
-  const isTeacherBook =
-    TEACHER_CATEGORIES.includes(
-      book.category
-    );
-
-  if (
-    profile.role === "user" &&
-    isTeacherBook
-  ) {
-    return {
-      success: false,
-      previewUrl: null,
-      downloadUrl: null,
-      allowDownload: false,
-      error:
-        "Buku Guru hanya dapat diakses oleh pihak yang berwenang.",
-    };
-  }
-
-  /**
-   * Signed URL.
-   *
-   * Masa berlaku dibuat pendek agar file
-   * tidak menggunakan URL publik permanen.
-   */
-  const expiresIn =
-    60 * 15;
-
-  const {
-    data,
-    error,
-  } =
-    await supabaseAdmin
-      .storage
-      .from("books")
-      .createSignedUrl(
-        book.pdf_path,
-        expiresIn
       );
 
-  if (error) {
+
+  if (
+    updateError
+  ) {
+    /**
+     * Jika database gagal diperbarui,
+     * file baru tetap ada.
+     *
+     * Jangan menghapus file baru secara
+     * otomatis karena bisa menyebabkan
+     * kehilangan data.
+     */
+
     return {
       success: false,
-      previewUrl: null,
-      downloadUrl: null,
-      allowDownload:
-        book.allow_download,
+
       error:
-        error.message,
+        updateError.message,
     };
   }
 
-  await historyBookViewed(
-    book.id,
-    book.title
-  );
 
   return {
     success: true,
 
-    /**
-     * Browser/PDF viewer membuka URL ini.
-     */
-    previewUrl:
-      data.signedUrl,
-
-    /**
-     * HANYA dikembalikan jika download
-     * memang diperbolehkan.
-     */
-    downloadUrl:
-      book.allow_download
-        ? data.signedUrl
-        : null,
-
-    allowDownload:
-      book.allow_download,
-
-    expiresIn,
-
-    book,
+    path:
+      result.path,
   };
 }
 
 
 /**
  * =========================================================
- * REGISTER DOWNLOAD
- * =========================================================
- *
- * Dipanggil ketika user benar-benar menekan
- * tombol download.
- *
- * Fungsi ini TIDAK memberikan izin download.
- *
- * Izin tetap berasal dari:
- *
- * book.allow_download
- *
+ * REPLACE PDF ALIAS
  * =========================================================
  */
 
-export async function registerBookDownload(
-  bookId: string
+export async function replacePdf(
+  bookId: string,
+  file: File
 ) {
-  const profile =
-    await getAuthProfile();
-
-  if (!profile) {
-    return {
-      success: false,
-      error:
-        "Silakan login terlebih dahulu.",
-    };
-  }
-
-  const result =
-    await getBookById(
-      bookId
-    );
-
-  if (
-    !result.success ||
-    !result.data
-  ) {
-    return {
-      success: false,
-      error:
-        result.error ??
-        "Buku tidak ditemukan.",
-    };
-  }
-
-  const book =
-    result.data;
-
-  if (
-    !book.allow_download
-  ) {
-    return {
-      success: false,
-      error:
-        "Download buku ini tidak diizinkan.",
-    };
-  }
-
-  if (
-    !book.pdf_path
-  ) {
-    return {
-      success: false,
-      error:
-        "File PDF belum tersedia.",
-    };
-  }
-
-  const isTeacherBook =
-    TEACHER_CATEGORIES.includes(
-      book.category
-    );
-
-  if (
-    profile.role === "user" &&
-    isTeacherBook
-  ) {
-    return {
-      success: false,
-      error:
-        "Anda tidak memiliki akses ke buku guru.",
-    };
-  }
-
-  await historyBookDownloaded(
-    book.id,
-    book.title
+  return uploadPdfToBook(
+    bookId,
+    file
   );
-
-  return {
-    success: true,
-  };
 }
 
 
 /**
  * =========================================================
- * DELETE PDF REFERENCE
+ * DELETE PDF ONLY
  * =========================================================
  *
- * Hanya menghapus referensi dari database.
- *
- * File Storage sebaiknya dihapus melalui
- * app/lib/storage.ts terlebih dahulu.
+ * Menghapus PDF tetapi mempertahankan
+ * data buku.
+ * =========================================================
  */
 
-export async function deleteBookPdfReference(
+export async function removeBookPdf(
   bookId: string
 ) {
-  const access =
-    await requireBookManager();
+  const context =
+    await requireAdmin();
 
-  if (!access.allowed) {
-    return {
-      success: false,
-      error:
-        access.error ??
-        "Tidak memiliki akses.",
-    };
-  }
-
-  const existing =
-    await getBookById(
-      bookId
-    );
 
   if (
-    !existing.success ||
-    !existing.data
+    !canManageBooks(
+      context.role
+    )
   ) {
     return {
       success: false,
+
       error:
-        existing.error ??
-        "Buku tidak ditemukan.",
+        "Anda tidak memiliki izin.",
     };
   }
+
 
   const {
-    data,
-    error,
+    data:
+      book,
+    error:
+      fetchError,
+  } =
+    await supabaseAdmin
+      .from("books")
+      .select(
+        `
+          id,
+          pdf_path
+        `
+      )
+      .eq(
+        "id",
+        bookId
+      )
+      .maybeSingle();
+
+
+  if (
+    fetchError
+  ) {
+    return {
+      success: false,
+
+      error:
+        fetchError.message,
+    };
+  }
+
+
+  if (!book) {
+    return {
+      success: false,
+
+      error:
+        "Buku tidak ditemukan.",
+    };
+  }
+
+
+  if (
+    book.pdf_path
+  ) {
+    const result =
+      await deleteBookPdf(
+        book.pdf_path
+      );
+
+
+    if (
+      !result.success
+    ) {
+      return {
+        success: false,
+
+        error:
+          result.error ??
+          "Gagal menghapus PDF.",
+      };
+    }
+  }
+
+
+  const {
+    error:
+      updateError,
   } =
     await supabaseAdmin
       .from("books")
@@ -1375,153 +1497,779 @@ export async function deleteBookPdfReference(
       .eq(
         "id",
         bookId
+      );
+
+
+  if (
+    updateError
+  ) {
+    return {
+      success: false,
+
+      error:
+        updateError.message,
+    };
+  }
+
+
+  return {
+    success: true,
+  };
+}
+
+
+/**
+ * =========================================================
+ * UPLOAD BOOK COVER
+ * =========================================================
+ */
+
+export async function uploadCoverToBook(
+  bookId: string,
+  file: File
+) {
+  const context =
+    await requireAdmin();
+
+
+  if (
+    !canManageBooks(
+      context.role
+    )
+  ) {
+    return {
+      success: false,
+
+      error:
+        "Anda tidak memiliki izin mengupload cover.",
+    };
+  }
+
+
+  const {
+    data:
+      book,
+    error:
+      fetchError,
+  } =
+    await supabaseAdmin
+      .from("books")
+      .select(
+        `
+          id,
+          cover_path
+        `
       )
-      .select("*")
+      .eq(
+        "id",
+        bookId
+      )
+      .maybeSingle();
+
+
+  if (
+    fetchError
+  ) {
+    return {
+      success: false,
+
+      error:
+        fetchError.message,
+    };
+  }
+
+
+  if (!book) {
+    return {
+      success: false,
+
+      error:
+        "Buku tidak ditemukan.",
+    };
+  }
+
+
+  const result =
+    await uploadBookCover(
+      file,
+      bookId
+    );
+
+
+  if (
+    !result.success ||
+    !result.path
+  ) {
+    return {
+      success: false,
+
+      error:
+        result.error ??
+        "Gagal mengupload cover.",
+    };
+  }
+
+
+  /**
+   * Hapus cover lama setelah cover baru
+   * berhasil diupload.
+   */
+
+  if (
+    book.cover_path
+  ) {
+    const {
+      error:
+        removeError,
+    } =
+      await supabaseAdmin
+        .storage
+        .from("book-covers")
+        .remove([
+          book.cover_path,
+        ]);
+
+
+    if (
+      removeError
+    ) {
+      console.error(
+        "Gagal menghapus cover lama:",
+        removeError
+      );
+    }
+  }
+
+
+  const {
+    error:
+      updateError,
+  } =
+    await supabaseAdmin
+      .from("books")
+      .update({
+        cover_path:
+          result.path,
+
+        updated_at:
+          new Date().toISOString(),
+      })
+      .eq(
+        "id",
+        bookId
+      );
+
+
+  if (
+    updateError
+  ) {
+    return {
+      success: false,
+
+      error:
+        updateError.message,
+    };
+  }
+
+
+  return {
+    success: true,
+
+    path:
+      result.path,
+  };
+}
+
+
+/**
+ * =========================================================
+ * GET BOOK PDF FOR VIEWING
+ * =========================================================
+ *
+ * INI UNTUK MEMBACA PDF DI WEBSITE.
+ *
+ * User TIDAK perlu mendownload PDF terlebih dahulu.
+ *
+ * Browser akan menerima signed URL kemudian
+ * PDF dapat dibuka melalui PDF viewer/browser.
+ *
+ * =========================================================
+ */
+
+export async function getBookPdfForViewing(
+  bookId: string
+): Promise<BookPdfResult> {
+  await requireAuth();
+
+
+  const result =
+    await getBookById(
+      bookId
+    );
+
+
+  if (
+    !result.success ||
+    !result.data
+  ) {
+    return {
+      success: false,
+
+      url: null,
+
+      error:
+        result.error ??
+        "Buku tidak ditemukan.",
+    };
+  }
+
+
+  const book =
+    result.data;
+
+
+  if (
+    !book.pdf_path
+  ) {
+    return {
+      success: false,
+
+      url: null,
+
+      error:
+        "PDF buku belum tersedia.",
+    };
+  }
+
+
+  /**
+   * Signed URL untuk membaca.
+   *
+   * Tidak tergantung allow_download.
+   *
+   * allow_download hanya menentukan apakah
+   * user boleh melakukan download.
+   */
+
+  const signed =
+    await createStorageSignedUrl(
+      "books",
+      book.pdf_path,
+      60 * 30
+    );
+
+
+  if (
+    !signed.success ||
+    !signed.url
+  ) {
+    return {
+      success: false,
+
+      url: null,
+
+      error:
+        signed.error ??
+        "Gagal membuat URL PDF.",
+    };
+  }
+
+
+  return {
+    success: true,
+
+    url:
+      signed.url,
+  };
+}
+
+
+/**
+ * =========================================================
+ * GET BOOK PDF FOR DOWNLOAD
+ * =========================================================
+ *
+ * Download hanya jika:
+ *
+ * book.allow_download === true
+ *
+ * Jika false:
+ *
+ * -> PDF tetap dapat dibaca
+ * -> download ditolak
+ *
+ * =========================================================
+ */
+
+export async function getBookPdfForDownload(
+  bookId: string
+): Promise<BookPdfResult> {
+  const context =
+    await requireAuth();
+
+
+  const result =
+    await getBookById(
+      bookId
+    );
+
+
+  if (
+    !result.success ||
+    !result.data
+  ) {
+    return {
+      success: false,
+
+      url: null,
+
+      error:
+        result.error ??
+        "Buku tidak ditemukan.",
+    };
+  }
+
+
+  const book =
+    result.data;
+
+
+  if (
+    !book.pdf_path
+  ) {
+    return {
+      success: false,
+
+      url: null,
+
+      error:
+        "PDF buku belum tersedia.",
+    };
+  }
+
+
+  /**
+   * Cek permission download.
+   */
+
+  if (
+    !book.allow_download
+  ) {
+    return {
+      success: false,
+
+      url: null,
+
+      error:
+        "Buku ini hanya dapat dibaca di website dan tidak diizinkan untuk didownload.",
+    };
+  }
+
+
+  /**
+   * Signed URL khusus download.
+   */
+
+  const signed =
+    await createDownloadSignedUrl(
+      "books",
+      book.pdf_path,
+      60 * 10
+    );
+
+
+  if (
+    !signed.success ||
+    !signed.url
+  ) {
+    return {
+      success: false,
+
+      url: null,
+
+      error:
+        signed.error ??
+        "Gagal membuat link download.",
+    };
+  }
+
+
+  return {
+    success: true,
+
+    url:
+      signed.url,
+  };
+}
+
+
+/**
+ * =========================================================
+ * CHECK DOWNLOAD PERMISSION
+ * ========================================================= */
+
+export async function canDownloadBook(
+  bookId: string
+) {
+  await requireAuth();
+
+
+  const result =
+    await getBookById(
+      bookId
+    );
+
+
+  if (
+    !result.success ||
+    !result.data
+  ) {
+    return false;
+  }
+
+
+  return Boolean(
+    result.data
+      .allow_download &&
+      result.data
+        .pdf_path
+  );
+}
+
+
+/**
+ * =========================================================
+ * GET BOOK COVER URL
+ * =========================================================
+ */
+
+export async function getBookCoverUrl(
+  bookId: string
+) {
+  await requireAuth();
+
+
+  const result =
+    await getBookById(
+      bookId
+    );
+
+
+  if (
+    !result.success ||
+    !result.data
+  ) {
+    return {
+      success: false,
+
+      url: null,
+    };
+  }
+
+
+  const book =
+    result.data;
+
+
+  if (
+    !book.cover_path
+  ) {
+    return {
+      success: true,
+
+      url: null,
+    };
+  }
+
+
+  const signed =
+    await createStorageSignedUrl(
+      "book-covers",
+      book.cover_path,
+      60 * 60
+    );
+
+
+  if (
+    !signed.success
+  ) {
+    return {
+      success: false,
+
+      url: null,
+
+      error:
+        signed.error,
+    };
+  }
+
+
+  return {
+    success: true,
+
+    url:
+      signed.url,
+  };
+}
+
+
+/**
+ * =========================================================
+ * UPDATE DOWNLOAD PERMISSION
+ * =========================================================
+ */
+
+export async function setBookDownloadPermission(
+  bookId: string,
+  allowDownload: boolean
+) {
+  const context =
+    await requireAdmin();
+
+
+  if (
+    !canChangeDownloadPermission(
+      context.role
+    )
+  ) {
+    return {
+      success: false,
+
+      error:
+        "Anda tidak memiliki izin mengubah perizinan download.",
+    };
+  }
+
+
+  const {
+    data,
+    error,
+  } =
+    await supabaseAdmin
+      .from("books")
+      .update({
+        allow_download:
+          Boolean(
+            allowDownload
+          ),
+
+        updated_at:
+          new Date().toISOString(),
+      })
+      .eq(
+        "id",
+        bookId
+      )
+      .select(
+        BOOK_SELECT
+      )
       .single();
+
 
   if (error) {
     return {
       success: false,
-      error: error.message,
+
+      data: null,
+
+      error:
+        error.message,
     };
   }
 
-  await historyBookPdfDeleted(
-    bookId,
-    existing.data.title
-  );
 
   return {
     success: true,
-    data: data as Book,
+
+    data:
+      data as Book,
   };
 }
 
 
 /**
  * =========================================================
- * CATEGORY HELPERS
+ * ACTIVATE / DEACTIVATE BOOK
  * =========================================================
  */
 
-export function isStudentBookCategory(
-  category: BookCategory
+export async function setBookActive(
+  bookId: string,
+  active: boolean
 ) {
-  return STUDENT_CATEGORIES.includes(
-    category
-  );
-}
+  const context =
+    await requireAdmin();
 
 
-export function isTeacherBookCategory(
-  category: BookCategory
-) {
-  return TEACHER_CATEGORIES.includes(
-    category
-  );
-}
-
-
-export function getCategoryLabel(
-  category: BookCategory
-) {
-  return (
-    CATEGORY_LABELS[category] ??
-    category
-  );
-}
-
-
-/**
- * =========================================================
- * CHECK BOOK ACCESS
- * =========================================================
- */
-
-export async function canAccessBook(
-  book: Book
-) {
-  const profile =
-    await getAuthProfile();
-
-  if (!profile) {
+  if (
+    !canManageBooks(
+      context.role
+    )
+  ) {
     return {
-      allowed: false,
-      reason:
-        "Silakan login terlebih dahulu.",
+      success: false,
+
+      error:
+        "Anda tidak memiliki izin.",
     };
   }
 
-  /**
-   * Admin dan developer dapat mengakses
-   * seluruh kategori.
-   */
-  if (
-    profile.role === "admin" ||
-    profile.role === "developer"
-  ) {
-    return {
-      allowed: true,
-      reason: null,
-    };
-  }
 
-  /**
-   * User biasa hanya Buku Siswa.
-   */
-  if (
-    profile.role === "user"
-  ) {
-    if (
-      isStudentBookCategory(
-        book.category
+  const {
+    data,
+    error,
+  } =
+    await supabaseAdmin
+      .from("books")
+      .update({
+        is_active:
+          Boolean(
+            active
+          ),
+
+        updated_at:
+          new Date().toISOString(),
+      })
+      .eq(
+        "id",
+        bookId
       )
-    ) {
-      return {
-        allowed: true,
-        reason: null,
-      };
-    }
+      .select(
+        BOOK_SELECT
+      )
+      .single();
 
+
+  if (error) {
     return {
-      allowed: false,
-      reason:
-        "Buku Guru hanya dapat diakses oleh pihak yang berwenang.",
+      success: false,
+
+      data: null,
+
+      error:
+        error.message,
     };
   }
+
 
   return {
-    allowed: false,
-    reason:
-      "Role tidak valid.",
+    success: true,
+
+    data:
+      data as Book,
   };
 }
 
 
 /**
  * =========================================================
- * SEARCH BOOKS
+ * GET BOOK STATISTICS
+ * =========================================================
+ *
+ * Digunakan untuk dashboard admin/developer.
+ *
  * =========================================================
  */
 
-export async function searchBooks(
-  search: string,
-  options?: {
-    category?: BookCategory | null;
+export async function getBookStatistics() {
+  const context =
+    await requireAdmin();
 
-    page?: number;
 
-    limit?: number;
+  if (
+    !canManageBooks(
+      context.role
+    )
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Anda tidak memiliki izin.",
+    };
   }
-) {
-  return getBooks({
-    search,
-    category:
-      options?.category ??
-      null,
-    page:
-      options?.page ?? 1,
-    limit:
-      options?.limit ?? 20,
-  });
+
+
+  const {
+    data,
+    error,
+  } =
+    await supabaseAdmin
+      .from("books")
+      .select(
+        `
+          id,
+          audience,
+          student_category,
+          teacher_class,
+          is_active,
+          allow_download
+        `
+      );
+
+
+  if (error) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        error.message,
+    };
+  }
+
+
+  const books =
+    data ?? [];
+
+
+  return {
+    success: true,
+
+    data: {
+      total:
+        books.length,
+
+      active:
+        books.filter(
+          book =>
+            book.is_active
+        ).length,
+
+      inactive:
+        books.filter(
+          book =>
+            !book.is_active
+        ).length,
+
+      student:
+        books.filter(
+          book =>
+            book.audience ===
+            "student"
+        ).length,
+
+      teacher:
+        books.filter(
+          book =>
+            book.audience ===
+            "teacher"
+        ).length,
+
+      downloadable:
+        books.filter(
+          book =>
+            book.allow_download
+        ).length,
+
+      readOnly:
+        books.filter(
+          book =>
+            !book.allow_download
+        ).length,
+    },
+  };
     }
