@@ -1,50 +1,34 @@
-import {
-  supabaseAdmin,
-} from "@/app/lib/supabase/admin";
-
-import {
-  getAuthProfile,
-} from "@/app/lib/auth";
-
-import {
-  historyReportCreated,
-} from "@/app/lib/history";
-
-import {
-  UserRole,
-} from "@/app/lib/permissions";
-
-
 /**
  * =========================================================
- * REPORT & REQUEST HELPER
+ * REPORT SERVICE
  * =========================================================
  *
  * File:
  * app/lib/reports.ts
  *
- * Digunakan untuk:
- *
- * USER
- * - membuat laporan
- * - mengirim request
- *
- * ADMIN
- * - melihat laporan user
- * - melihat request pendaftaran
- * - memproses laporan
- *
- * DEVELOPER
- * - melihat semua laporan
- * - melihat laporan admin
- * - melihat request
- * - memproses seluruh laporan
- *
- * SECURITY
- * - otomatis membuat laporan setelah login gagal 5x
+ * Fungsi:
+ * - User mengirim report
+ * - Admin melihat report user
+ * - Developer melihat semua report
+ * - Admin/developer dapat memperbarui status report
+ * - Sistem otomatis membuat report setelah 5x login gagal
  *
  * =========================================================
  */
+
+import {
+  requireAdmin,
+  requireAuth,
+} from "@/app/lib/auth";
+
+import {
+  supabaseAdmin,
+} from "@/app/lib/supabase/admin";
+
+import {
+  canViewAllReports,
+  canViewAdminReports,
+} from "@/app/lib/permissions";
 
 
 /**
@@ -55,14 +39,13 @@ import {
 
 export type ReportType =
   | "bug"
-  | "book_problem"
-  | "website_problem"
-  | "account_problem"
-  | "login_problem"
-  | "security"
-  | "request"
+  | "book"
+  | "account"
+  | "login"
+  | "website"
+  | "other"
   | "registration"
-  | "other";
+  | "security";
 
 
 export type ReportPriority =
@@ -74,156 +57,147 @@ export type ReportPriority =
 
 export type ReportStatus =
   | "pending"
-  | "reviewing"
+  | "reviewed"
+  | "processing"
   | "resolved"
   | "rejected";
 
 
-export interface CreateReportInput {
-  type: ReportType;
+export type ReporterRole =
+  | "user"
+  | "admin"
+  | "developer";
 
-  title: string;
 
-  description: string;
+export interface Report {
+  id: string;
 
-  priority?:
-    | ReportPriority
+  reporter_id:
+    | string
     | null;
 
-  metadata?:
-    | Record<string, unknown>
+  reporter_role:
+    | ReporterRole
     | null;
-}
 
+  type:
+    | ReportType;
 
-export interface ReportResult {
-  success: boolean;
+  priority:
+    | ReportPriority;
 
-  data?: unknown;
+  subject: string;
 
-  error?: string;
-}
+  message: string;
 
+  status:
+    | ReportStatus;
 
-/**
- * =========================================================
- * SANITIZE METADATA
- * =========================================================
- */
+  admin_note:
+    | string
+    | null;
 
-function sanitizeMetadata(
   metadata:
     | Record<string, unknown>
-    | null
-    | undefined
-) {
-  if (!metadata) {
-    return null;
-  }
+    | null;
 
+  created_at: string;
 
-  const forbidden = [
-    "password",
-    "new_password",
-    "old_password",
-    "confirm_password",
+  updated_at: string;
 
-    "access_token",
-    "refresh_token",
-
-    "service_role_key",
-
-    "api_key",
-    "apikey",
-
-    "secret",
-    "token",
-  ];
-
-
-  const result: Record<
-    string,
-    unknown
-  > = {};
-
-
-  for (
-    const [
-      key,
-      value,
-    ] of Object.entries(
-      metadata
-    )
-  ) {
-    if (
-      forbidden.includes(
-        key.toLowerCase()
-      )
-    ) {
-      continue;
-    }
-
-
-    result[key] =
-      value;
-  }
-
-
-  return result;
+  resolved_at:
+    | string
+    | null;
 }
 
 
 /**
  * =========================================================
- * VALIDATE REPORT
+ * CONSTANTS
  * =========================================================
  */
 
-function validateReportInput(
-  input: CreateReportInput
+const REPORT_SELECT = `
+  id,
+  reporter_id,
+  reporter_role,
+  type,
+  priority,
+  subject,
+  message,
+  status,
+  admin_note,
+  metadata,
+  created_at,
+  updated_at,
+  resolved_at
+`;
+
+
+/**
+ * =========================================================
+ * HELPERS
+ * =========================================================
+ */
+
+function cleanString(
+  value: unknown
 ) {
   if (
-    !input.type
+    typeof value !==
+    "string"
   ) {
-    return "Jenis laporan wajib dipilih.";
+    return "";
   }
 
-
-  if (
-    !input.title ||
-    input.title.trim().length <
-      3
-  ) {
-    return "Judul laporan minimal 3 karakter.";
-  }
+  return value.trim();
+}
 
 
-  if (
-    input.title.trim().length >
-      150
-  ) {
-    return "Judul laporan terlalu panjang.";
-  }
+function isReportType(
+  value: unknown
+): value is ReportType {
+  return [
+    "bug",
+    "book",
+    "account",
+    "login",
+    "website",
+    "other",
+    "registration",
+    "security",
+  ].includes(
+    value as string
+  );
+}
 
 
-  if (
-    !input.description ||
-    input.description.trim().length <
-      5
-  ) {
-    return "Deskripsi laporan minimal 5 karakter.";
-  }
+function isReportPriority(
+  value: unknown
+): value is ReportPriority {
+  return [
+    "low",
+    "normal",
+    "high",
+    "critical",
+  ].includes(
+    value as string
+  );
+}
 
 
-  if (
-    input.description.trim().length >
-      5000
-  ) {
-    return "Deskripsi laporan terlalu panjang.";
-  }
-
-
-  return null;
+function isReportStatus(
+  value: unknown
+): value is ReportStatus {
+  return [
+    "pending",
+    "reviewed",
+    "processing",
+    "resolved",
+    "rejected",
+  ].includes(
+    value as string
+  );
 }
 
 
@@ -232,708 +206,176 @@ function validateReportInput(
  * CREATE REPORT
  * =========================================================
  *
- * User/admin yang sedang login dapat mengirim report.
+ * Semua user yang sudah login dapat membuat report.
+ *
+ * =========================================================
  */
+
 export async function createReport(
-  input: CreateReportInput
-): Promise<ReportResult> {
-  try {
-    const profile =
-      await getAuthProfile();
-
-
-    if (!profile) {
-      return {
-        success: false,
-
-        error:
-          "Silakan login terlebih dahulu.",
-      };
-    }
-
-
-    if (
-      profile.status !==
-      "active"
-    ) {
-      return {
-        success: false,
-
-        error:
-          "Akun belum aktif atau telah dinonaktifkan.",
-      };
-    }
-
-
-    const validation =
-      validateReportInput(
-        input
-      );
-
-
-    if (validation) {
-      return {
-        success: false,
-
-        error:
-          validation,
-      };
-    }
-
-
-    const metadata =
-      sanitizeMetadata(
-        input.metadata
-      );
-
-
-    const {
-      data,
-      error,
-    } =
-      await supabaseAdmin
-        .from("reports")
-        .insert({
-          reporter_id:
-            profile.id,
-
-          reporter_role:
-            profile.role,
-
-          type:
-            input.type,
-
-          title:
-            input.title.trim(),
-
-          description:
-            input.description.trim(),
-
-          priority:
-            input.priority ??
-            "normal",
-
-          status:
-            "pending",
-
-          metadata,
-        })
-        .select(
-          "*"
-        )
-        .single();
-
-
-    if (error) {
-      console.error(
-        "createReport error:",
-        error
-      );
-
-      return {
-        success: false,
-
-        error:
-          error.message,
-      };
-    }
-
-
-    /**
-     * Catat ke history.
-     */
-    await historyReportCreated(
-      data.id,
-      data.title
-    );
-
-
-    return {
-      success: true,
-
-      data,
-    };
-  } catch (error) {
-    console.error(
-      "createReport exception:",
-      error
-    );
-
-
-    return {
-      success: false,
-
-      error:
-        error instanceof Error
-          ? error.message
-          : "Terjadi kesalahan.",
-    };
-  }
-}
-
-
-/**
- * =========================================================
- * CREATE REGISTRATION REQUEST
- * =========================================================
- *
- * Digunakan halaman Sign In.
- *
- * User belum mempunyai akun.
- *
- * Data pendaftaran masuk ke reports,
- * sehingga admin/developer dapat memprosesnya.
- */
-export async function createRegistrationRequest(
   input: {
-    fullName: string;
+    type: ReportType;
 
-    address: string;
+    subject: string;
 
-    birthPlace: string;
+    message: string;
 
-    birthDate: string;
+    priority?:
+      | ReportPriority;
 
-    parentWhatsapp: string;
-
-    gmail: string;
-
-    classLevel:
-      | 1
-      | 2
-      | 3
-      | 4
-      | 5
-      | 6;
-  }
-): Promise<ReportResult> {
-  try {
-    /**
-     * Validasi nama.
-     */
-    if (
-      !input.fullName ||
-      input.fullName.trim().length <
-        3
-    ) {
-      return {
-        success: false,
-
-        error:
-          "Nama lengkap wajib diisi.",
-      };
-    }
-
-
-    /**
-     * Validasi alamat.
-     */
-    if (
-      !input.address ||
-      input.address.trim().length <
-        5
-    ) {
-      return {
-        success: false,
-
-        error:
-          "Alamat wajib diisi.",
-      };
-    }
-
-
-    /**
-     * Validasi tempat lahir.
-     */
-    if (
-      !input.birthPlace ||
-      input.birthPlace.trim().length <
-        2
-    ) {
-      return {
-        success: false,
-
-        error:
-          "Tempat lahir wajib diisi.",
-      };
-    }
-
-
-    /**
-     * Validasi tanggal lahir.
-     */
-    if (
-      !input.birthDate
-    ) {
-      return {
-        success: false,
-
-        error:
-          "Tanggal lahir wajib diisi.",
-      };
-    }
-
-
-    /**
-     * Validasi WhatsApp.
-     */
-    if (
-      !input.parentWhatsapp ||
-      input.parentWhatsapp
-        .replace(
-          /\D/g,
-          ""
-        )
-        .length <
-        8
-    ) {
-      return {
-        success: false,
-
-        error:
-          "Nomor WhatsApp orang tua wajib aktif.",
-      };
-    }
-
-
-    /**
-     * Validasi Gmail.
-     */
-    const email =
-      input.gmail
-        .trim()
-        .toLowerCase();
-
-
-    if (
-      !email ||
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
-        email
-      )
-    ) {
-      return {
-        success: false,
-
-        error:
-          "Alamat Gmail tidak valid.",
-      };
-    }
-
-
-    /**
-     * Validasi kelas.
-     */
-    if (
-      ![
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-      ].includes(
-        Number(
-          input.classLevel
-        )
-      )
-    ) {
-      return {
-        success: false,
-
-        error:
-          "Tingkatan kelas tidak valid.",
-      };
-    }
-
-
-    /**
-     * Metadata tidak menyimpan password
-     * karena akun belum dibuat.
-     */
-    const metadata = {
-      full_name:
-        input.fullName.trim(),
-
-      address:
-        input.address.trim(),
-
-      birth_place:
-        input.birthPlace.trim(),
-
-      birth_date:
-        input.birthDate,
-
-      parent_whatsapp:
-        input.parentWhatsapp.trim(),
-
-      gmail:
-        email,
-
-      class_level:
-        Number(
-          input.classLevel
-        ),
-    };
-
-
-    const {
-      data,
-      error,
-    } =
-      await supabaseAdmin
-        .from("reports")
-        .insert({
-          reporter_id:
-            null,
-
-          reporter_role:
-            "user",
-
-          type:
-            "registration",
-
-          title:
-            `Permintaan pendaftaran akun - ${input.fullName.trim()}`,
-
-          description:
-            "Pengajuan pendaftaran akun perpustakaan sekolah.",
-
-          priority:
-            "normal",
-
-          status:
-            "pending",
-
-          metadata:
-            sanitizeMetadata(
-              metadata
-            ),
-        })
-        .select(
-          "*"
-        )
-        .single();
-
-
-    if (error) {
-      console.error(
-        "createRegistrationRequest error:",
-        error
-      );
-
-      return {
-        success: false,
-
-        error:
-          error.message,
-      };
-    }
-
-
-    return {
-      success: true,
-
-      data,
-    };
-  } catch (error) {
-    console.error(
-      "createRegistrationRequest exception:",
-      error
-    );
-
-
-    return {
-      success: false,
-
-      error:
-        error instanceof Error
-          ? error.message
-          : "Terjadi kesalahan.",
-    };
-  }
-}
-
-
-/**
- * =========================================================
- * CREATE AUTOMATIC LOGIN FAILURE REPORT
- * =========================================================
- *
- * Dipanggil ketika login gagal sampai 5 kali.
- *
- * Report masuk ke admin/developer.
- *
- * Tidak menyimpan password.
- */
-export async function createLoginFailureReport(
-  input: {
-    username?: string | null;
-
-    profileId?:
-      | string
-      | null;
-
-    attemptCount: number;
-
-    loginType?:
-      | "user"
-      | "admin"
-      | "developer";
-
-    ipAddress?:
-      | string
-      | null;
-
-    userAgent?:
-      | string
-      | null;
-  }
-): Promise<ReportResult> {
-  try {
-    if (
-      input.attemptCount <
-      5
-    ) {
-      return {
-        success: false,
-
-        error:
-          "Laporan otomatis hanya dibuat setelah 5 kali percobaan login gagal.",
-      };
-    }
-
-
-    /**
-     * Jangan menyimpan password.
-     */
-    const metadata = {
-      username:
-        input.username ??
-        null,
-
-      profile_id:
-        input.profileId ??
-        null,
-
-      attempt_count:
-        input.attemptCount,
-
-      login_type:
-        input.loginType ??
-        "user",
-
-      ip_address:
-        input.ipAddress ??
-        null,
-
-      user_agent:
-        input.userAgent ??
-        null,
-
-      automatic:
-        true,
-    };
-
-
-    const {
-      data,
-      error,
-    } =
-      await supabaseAdmin
-        .from("reports")
-        .insert({
-          reporter_id:
-            input.profileId ??
-            null,
-
-          reporter_role:
-            input.loginType ??
-            "user",
-
-          type:
-            "security",
-
-          title:
-            "Peringatan: 5 kali percobaan login gagal",
-
-          description:
-            `Terdeteksi ${input.attemptCount} kali percobaan login gagal pada akun ${input.username ?? "tidak diketahui"}.`,
-
-          priority:
-            "high",
-
-          status:
-            "pending",
-
-          metadata:
-            sanitizeMetadata(
-              metadata
-            ),
-        })
-        .select(
-          "*"
-        )
-        .single();
-
-
-    if (error) {
-      console.error(
-        "createLoginFailureReport error:",
-        error
-      );
-
-      return {
-        success: false,
-
-        error:
-          error.message,
-      };
-    }
-
-
-    return {
-      success: true,
-
-      data,
-    };
-  } catch (error) {
-    console.error(
-      "createLoginFailureReport exception:",
-      error
-    );
-
-
-    return {
-      success: false,
-
-      error:
-        error instanceof Error
-          ? error.message
-          : "Terjadi kesalahan.",
-    };
-  }
-}
-
-
-/**
- * =========================================================
- * GET OWN REPORTS
- * =========================================================
- *
- * User/admin dapat melihat laporan miliknya sendiri
- * jika nantinya UI membutuhkan fitur tersebut.
- */
-export async function getOwnReports(
-  options?: {
-    page?: number;
-
-    limit?: number;
-
-    status?:
-      | ReportStatus
-      | null;
+    metadata?:
+      | Record<string, unknown>;
   }
 ) {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      success: false,
-
-      data: [],
-
-      total: 0,
-
-      error:
-        "Belum login.",
-    };
-  }
-
-
-  const page =
-    Math.max(
-      1,
-      options?.page ??
-        1
-    );
-
-
-  const limit =
-    Math.min(
-      100,
-      Math.max(
-        1,
-        options?.limit ??
-          20
-      )
-    );
-
-
-  const from =
-    (page - 1) *
-    limit;
-
-  const to =
-    from +
-    limit -
-    1;
-
-
-  let query =
-    supabaseAdmin
-      .from("reports")
-      .select(
-        "*",
-        {
-          count:
-            "exact",
-        }
-      )
-      .eq(
-        "reporter_id",
-        profile.id
-      )
-      .order(
-        "created_at",
-        {
-          ascending:
-            false,
-        }
-      )
-      .range(
-        from,
-        to
-      );
+  const context =
+    await requireAuth();
 
 
   if (
-    options?.status
+    !isReportType(
+      input.type
+    )
   ) {
-    query =
-      query.eq(
-        "status",
-        options.status
-      );
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Jenis laporan tidak valid.",
+    };
+  }
+
+
+  const subject =
+    cleanString(
+      input.subject
+    );
+
+  const message =
+    cleanString(
+      input.message
+    );
+
+
+  if (
+    !subject
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Judul laporan wajib diisi.",
+    };
+  }
+
+
+  if (
+    subject.length >
+    255
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Judul laporan maksimal 255 karakter.",
+    };
+  }
+
+
+  if (
+    !message
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Isi laporan wajib diisi.",
+    };
+  }
+
+
+  if (
+    message.length >
+    20000
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Isi laporan terlalu panjang.",
+    };
+  }
+
+
+  const priority =
+    input.priority ??
+    "normal";
+
+
+  if (
+    !isReportPriority(
+      priority
+    )
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Prioritas laporan tidak valid.",
+    };
   }
 
 
   const {
     data,
-    count,
     error,
   } =
-    await query;
+    await supabaseAdmin
+      .from("reports")
+      .insert({
+        reporter_id:
+          context.userId,
+
+        reporter_role:
+          context.role,
+
+        type:
+          input.type,
+
+        priority,
+
+        subject,
+
+        message,
+
+        status:
+          "pending",
+
+        metadata:
+          input.metadata ??
+          null,
+      })
+      .select(
+        REPORT_SELECT
+      )
+      .single();
 
 
   if (error) {
     return {
       success: false,
 
-      data: [],
-
-      total: 0,
+      data: null,
 
       error:
         error.message,
@@ -945,14 +387,387 @@ export async function getOwnReports(
     success: true,
 
     data:
-      data ?? [],
+      data as Report,
+  };
+}
 
-    total:
-      count ?? 0,
 
-    page,
+/**
+ * =========================================================
+ * CREATE REPORT WITHOUT USER
+ * =========================================================
+ *
+ * Untuk kasus tertentu seperti:
+ * - login gagal
+ * - percobaan login berulang
+ * - sistem
+ *
+ * Tidak menggunakan requireAuth().
+ *
+ * Hanya server yang boleh memanggil function ini.
+ *
+ * =========================================================
+ */
 
-    limit,
+export async function createSystemReport(
+  input: {
+    type: ReportType;
+
+    subject: string;
+
+    message: string;
+
+    priority?:
+      | ReportPriority;
+
+    reporterId?:
+      | string
+      | null;
+
+    reporterRole?:
+      | ReporterRole
+      | null;
+
+    metadata?:
+      | Record<string, unknown>;
+  }
+) {
+  if (
+    !isReportType(
+      input.type
+    )
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Jenis laporan tidak valid.",
+    };
+  }
+
+
+  const subject =
+    cleanString(
+      input.subject
+    );
+
+  const message =
+    cleanString(
+      input.message
+    );
+
+
+  if (
+    !subject ||
+    !message
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Subject dan message wajib diisi.",
+    };
+  }
+
+
+  const priority =
+    input.priority ??
+    "high";
+
+
+  if (
+    !isReportPriority(
+      priority
+    )
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Prioritas tidak valid.",
+    };
+  }
+
+
+  const {
+    data,
+    error,
+  } =
+    await supabaseAdmin
+      .from("reports")
+      .insert({
+        reporter_id:
+          input.reporterId ??
+          null,
+
+        reporter_role:
+          input.reporterRole ??
+          null,
+
+        type:
+          input.type,
+
+        priority,
+
+        subject,
+
+        message,
+
+        status:
+          "pending",
+
+        metadata:
+          input.metadata ??
+          null,
+      })
+      .select(
+        REPORT_SELECT
+      )
+      .single();
+
+
+  if (error) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        error.message,
+    };
+  }
+
+
+  return {
+    success: true,
+
+    data:
+      data as Report,
+  };
+}
+
+
+/**
+ * =========================================================
+ * GET MY REPORTS
+ * =========================================================
+ *
+ * User hanya melihat laporan miliknya sendiri.
+ *
+ * =========================================================
+ */
+
+export async function getMyReports(
+  options?: {
+    limit?: number;
+
+    offset?: number;
+  }
+) {
+  const context =
+    await requireAuth();
+
+
+  const limit =
+    Math.min(
+      Math.max(
+        options?.limit ??
+          20,
+        1
+      ),
+      100
+    );
+
+
+  const offset =
+    Math.max(
+      options?.offset ??
+        0,
+      0
+    );
+
+
+  const {
+    data,
+    error,
+  } =
+    await supabaseAdmin
+      .from("reports")
+      .select(
+        REPORT_SELECT
+      )
+      .eq(
+        "reporter_id",
+        context.userId
+      )
+      .order(
+        "created_at",
+        {
+          ascending:
+            false,
+        }
+      )
+      .range(
+        offset,
+        offset +
+          limit -
+          1
+      );
+
+
+  if (error) {
+    return {
+      success: false,
+
+      data: [],
+
+      error:
+        error.message,
+    };
+  }
+
+
+  return {
+    success: true,
+
+    data:
+      (data ??
+        []) as Report[],
+  };
+}
+
+
+/**
+ * =========================================================
+ * GET REPORT BY ID
+ * =========================================================
+ */
+
+export async function getReportById(
+  reportId: string
+) {
+  const context =
+    await requireAuth();
+
+
+  if (
+    !reportId
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Report ID tidak valid.",
+    };
+  }
+
+
+  const {
+    data,
+    error,
+  } =
+    await supabaseAdmin
+      .from("reports")
+      .select(
+        REPORT_SELECT
+      )
+      .eq(
+        "id",
+        reportId
+      )
+      .maybeSingle();
+
+
+  if (error) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        error.message,
+    };
+  }
+
+
+  if (!data) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Laporan tidak ditemukan.",
+    };
+  }
+
+
+  const report =
+    data as Report;
+
+
+  /**
+   * User hanya boleh melihat report miliknya.
+   */
+
+  if (
+    context.role ===
+    "user"
+  ) {
+    if (
+      report.reporter_id !==
+      context.userId
+    ) {
+      return {
+        success: false,
+
+        data: null,
+
+        error:
+          "Anda tidak memiliki akses ke laporan ini.",
+      };
+    }
+  }
+
+
+  /**
+   * Admin tidak boleh melihat
+   * laporan milik developer.
+   */
+
+  if (
+    context.role ===
+    "admin"
+  ) {
+    if (
+      report.reporter_role ===
+      "developer"
+    ) {
+      return {
+        success: false,
+
+        data: null,
+
+        error:
+          "Laporan developer tidak dapat diakses admin.",
+      };
+    }
+  }
+
+
+  return {
+    success: true,
+
+    data:
+      report,
   };
 }
 
@@ -963,110 +778,82 @@ export async function getOwnReports(
  * =========================================================
  *
  * ADMIN:
- * - melihat report user
+ * - user
+ * - admin
  *
  * DEVELOPER:
- * - melihat report user
- * - melihat report admin
+ * - user
+ * - admin
+ * - developer
  *
- * Developer tidak dibatasi oleh reporter_role user/admin.
+ * =========================================================
  */
+
 export async function getAllReports(
   options?: {
-    page?: number;
+    status?:
+      | ReportStatus;
+
+    type?:
+      | ReportType;
+
+    priority?:
+      | ReportPriority;
+
+    reporterRole?:
+      | ReporterRole;
+
+    search?: string;
 
     limit?: number;
 
-    status?:
-      | ReportStatus
-      | null;
-
-    type?:
-      | ReportType
-      | null;
-
-    reporterRole?:
-      | UserRole
-      | null;
+    offset?: number;
   }
 ) {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      success: false,
-
-      data: [],
-
-      total: 0,
-
-      error:
-        "Belum login.",
-    };
-  }
-
-
-  const role =
-    profile.role as UserRole;
+  const context =
+    await requireAdmin();
 
 
   if (
-    role !== "admin" &&
-    role !== "developer"
+    !canViewAllReports(
+      context.role
+    )
   ) {
     return {
       success: false,
 
       data: [],
 
-      total: 0,
-
       error:
-        "Tidak memiliki akses.",
+        "Anda tidak memiliki akses ke seluruh laporan.",
     };
   }
 
 
-  const page =
-    Math.max(
-      1,
-      options?.page ??
-        1
-    );
-
-
   const limit =
     Math.min(
-      100,
       Math.max(
-        1,
         options?.limit ??
-          50
-      )
+          50,
+        1
+      ),
+      100
     );
 
 
-  const from =
-    (page - 1) *
-    limit;
-
-  const to =
-    from +
-    limit -
-    1;
+  const offset =
+    Math.max(
+      options?.offset ??
+        0,
+      0
+    );
 
 
   let query =
     supabaseAdmin
       .from("reports")
       .select(
-        "*",
-        {
-          count:
-            "exact",
-        }
+        REPORT_SELECT
       )
       .order(
         "created_at",
@@ -1074,26 +861,54 @@ export async function getAllReports(
           ascending:
             false,
         }
-      )
-      .range(
-        from,
-        to
       );
 
 
   /**
-   * Admin tidak boleh melihat laporan
-   * yang dibuat oleh admin lain.
-   *
-   * Developer boleh melihat user + admin.
+   * Admin tidak melihat report developer.
    */
+
   if (
-    role === "admin"
+    context.role ===
+    "admin"
   ) {
+    query =
+      query.neq(
+        "reporter_role",
+        "developer"
+      );
+  }
+
+
+  /**
+   * Developer dapat melihat
+   * semua role.
+   */
+
+  if (
+    options?.reporterRole
+  ) {
+    if (
+      context.role ===
+        "admin" &&
+      options.reporterRole ===
+        "developer"
+    ) {
+      return {
+        success: false,
+
+        data: [],
+
+        error:
+          "Admin tidak dapat melihat report developer.",
+      };
+    }
+
+
     query =
       query.eq(
         "reporter_role",
-        "user"
+        options.reporterRole
       );
   }
 
@@ -1101,6 +916,22 @@ export async function getAllReports(
   if (
     options?.status
   ) {
+    if (
+      !isReportStatus(
+        options.status
+      )
+    ) {
+      return {
+        success: false,
+
+        data: [],
+
+        error:
+          "Status tidak valid.",
+      };
+    }
+
+
     query =
       query.eq(
         "status",
@@ -1112,6 +943,22 @@ export async function getAllReports(
   if (
     options?.type
   ) {
+    if (
+      !isReportType(
+        options.type
+      )
+    ) {
+      return {
+        success: false,
+
+        data: [],
+
+        error:
+          "Jenis report tidak valid.",
+      };
+    }
+
+
     query =
       query.eq(
         "type",
@@ -1120,37 +967,60 @@ export async function getAllReports(
   }
 
 
-  /**
-   * Filter reporter role hanya boleh digunakan
-   * sesuai hak akses.
-   */
   if (
-    options?.reporterRole
+    options?.priority
   ) {
     if (
-      role === "developer"
+      !isReportPriority(
+        options.priority
+      )
     ) {
-      query =
-        query.eq(
-          "reporter_role",
-          options.reporterRole
-        );
-    } else {
-      /**
-       * Admin tetap dipaksa hanya user.
-       */
-      query =
-        query.eq(
-          "reporter_role",
-          "user"
-        );
+      return {
+        success: false,
+
+        data: [],
+
+        error:
+          "Prioritas tidak valid.",
+      };
     }
+
+
+    query =
+      query.eq(
+        "priority",
+        options.priority
+      );
   }
+
+
+  const search =
+    cleanString(
+      options?.search
+    );
+
+
+  if (
+    search
+  ) {
+    query =
+      query.or(
+        `subject.ilike.%${search}%,message.ilike.%${search}%`
+      );
+  }
+
+
+  query =
+    query.range(
+      offset,
+      offset +
+        limit -
+        1
+    );
 
 
   const {
     data,
-    count,
     error,
   } =
     await query;
@@ -1162,7 +1032,135 @@ export async function getAllReports(
 
       data: [],
 
-      total: 0,
+      error:
+        error.message,
+    };
+  }
+
+
+  return {
+    success: true,
+
+    data:
+      (data ??
+        []) as Report[],
+  };
+}
+
+
+/**
+ * =========================================================
+ * GET ADMIN REPORTS
+ * =========================================================
+ *
+ * Hanya developer.
+ *
+ * Digunakan untuk monitoring report
+ * yang dibuat oleh admin.
+ *
+ * =========================================================
+ */
+
+export async function getAdminReports(
+  options?: {
+    status?:
+      | ReportStatus;
+
+    limit?: number;
+
+    offset?: number;
+  }
+) {
+  const context =
+    await requireAdmin();
+
+
+  if (
+    !canViewAdminReports(
+      context.role
+    )
+  ) {
+    return {
+      success: false,
+
+      data: [],
+
+      error:
+        "Hanya developer yang dapat melihat laporan admin.",
+    };
+  }
+
+
+  let query =
+    supabaseAdmin
+      .from("reports")
+      .select(
+        REPORT_SELECT
+      )
+      .eq(
+        "reporter_role",
+        "admin"
+      )
+      .order(
+        "created_at",
+        {
+          ascending:
+            false,
+        }
+      );
+
+
+  if (
+    options?.status
+  ) {
+    query =
+      query.eq(
+        "status",
+        options.status
+      );
+  }
+
+
+  const limit =
+    Math.min(
+      Math.max(
+        options?.limit ??
+          50,
+        1
+      ),
+      100
+    );
+
+
+  const offset =
+    Math.max(
+      options?.offset ??
+        0,
+      0
+    );
+
+
+  query =
+    query.range(
+      offset,
+      offset +
+        limit -
+        1
+    );
+
+
+  const {
+    data,
+    error,
+  } =
+    await query;
+
+
+  if (error) {
+    return {
+      success: false,
+
+      data: [],
 
       error:
         error.message,
@@ -1174,154 +1172,8 @@ export async function getAllReports(
     success: true,
 
     data:
-      data ?? [],
-
-    total:
-      count ?? 0,
-
-    page,
-
-    limit,
-  };
-}
-
-
-/**
- * =========================================================
- * GET SINGLE REPORT
- * =========================================================
- */
-
-export async function getReportById(
-  reportId: string
-) {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      success: false,
-
-      data: null,
-
-      error:
-        "Belum login.",
-    };
-  }
-
-
-  const role =
-    profile.role as UserRole;
-
-
-  const {
-    data: report,
-    error,
-  } =
-    await supabaseAdmin
-      .from("reports")
-      .select(
-        "*"
-      )
-      .eq(
-        "id",
-        reportId
-      )
-      .maybeSingle();
-
-
-  if (error) {
-    return {
-      success: false,
-
-      data: null,
-
-      error:
-        error.message,
-    };
-  }
-
-
-  if (!report) {
-    return {
-      success: false,
-
-      data: null,
-
-      error:
-        "Laporan tidak ditemukan.",
-    };
-  }
-
-
-  /**
-   * User hanya boleh melihat report miliknya.
-   */
-  if (
-    role === "user"
-  ) {
-    if (
-      report.reporter_id !==
-      profile.id
-    ) {
-      return {
-        success: false,
-
-        data: null,
-
-        error:
-          "Anda tidak memiliki akses.",
-      };
-    }
-  }
-
-
-  /**
-   * Admin tidak boleh melihat report admin.
-   */
-  if (
-    role === "admin"
-  ) {
-    if (
-      report.reporter_role !==
-      "user"
-    ) {
-      return {
-        success: false,
-
-        data: null,
-
-        error:
-          "Admin tidak memiliki akses ke laporan admin/developer.",
-      };
-    }
-  }
-
-
-  /**
-   * Developer dapat melihat report user/admin.
-   */
-  if (
-    role !== "user" &&
-    role !== "admin" &&
-    role !== "developer"
-  ) {
-    return {
-      success: false,
-
-      data: null,
-
-      error:
-        "Role tidak valid.",
-    };
-  }
-
-
-  return {
-    success: true,
-
-    data: report,
+      (data ??
+        []) as Report[],
   };
 }
 
@@ -1330,83 +1182,67 @@ export async function getReportById(
  * =========================================================
  * UPDATE REPORT STATUS
  * =========================================================
- *
- * Admin:
- * - dapat mengubah status report user
- *
- * Developer:
- * - dapat mengubah semua report user/admin
  */
+
 export async function updateReportStatus(
   reportId: string,
-  status: ReportStatus
+  status: ReportStatus,
+  adminNote?: string
 ) {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      success: false,
-
-      error:
-        "Belum login.",
-    };
-  }
-
-
-  const role =
-    profile.role as UserRole;
+  const context =
+    await requireAdmin();
 
 
   if (
-    role !== "admin" &&
-    role !== "developer"
+    !canViewAllReports(
+      context.role
+    )
   ) {
     return {
       success: false,
 
+      data: null,
+
       error:
-        "Tidak memiliki akses.",
+        "Anda tidak memiliki izin.",
     };
   }
 
 
-  const validStatuses: ReportStatus[] =
-    [
-      "pending",
-      "reviewing",
-      "resolved",
-      "rejected",
-    ];
-
-
   if (
-    !validStatuses.includes(
+    !isReportStatus(
       status
     )
   ) {
     return {
       success: false,
 
+      data: null,
+
       error:
-        "Status laporan tidak valid.",
+        "Status report tidak valid.",
     };
   }
 
 
   /**
-   * Ambil report dahulu untuk memastikan
-   * admin tidak memproses report admin.
+   * Admin tidak boleh mengubah
+   * report milik developer.
    */
+
   const {
-    data: report,
-    error: findError,
+    data:
+      existingReport,
+    error:
+      fetchError,
   } =
     await supabaseAdmin
       .from("reports")
       .select(
-        "id, reporter_role, title"
+        `
+          id,
+          reporter_role
+        `
       )
       .eq(
         "id",
@@ -1415,19 +1251,27 @@ export async function updateReportStatus(
       .maybeSingle();
 
 
-  if (findError) {
+  if (
+    fetchError
+  ) {
     return {
       success: false,
 
+      data: null,
+
       error:
-        findError.message,
+        fetchError.message,
     };
   }
 
 
-  if (!report) {
+  if (
+    !existingReport
+  ) {
     return {
       success: false,
+
+      data: null,
 
       error:
         "Laporan tidak ditemukan.",
@@ -1436,16 +1280,56 @@ export async function updateReportStatus(
 
 
   if (
-    role === "admin" &&
-    report.reporter_role !==
-      "user"
+    context.role ===
+      "admin" &&
+    existingReport.reporter_role ===
+      "developer"
   ) {
     return {
       success: false,
 
+      data: null,
+
       error:
-        "Admin tidak dapat memproses laporan admin/developer.",
+        "Admin tidak dapat mengubah report developer.",
     };
+  }
+
+
+  const updateData: Record<
+    string,
+    unknown
+  > = {
+    status,
+
+    updated_at:
+      new Date().toISOString(),
+  };
+
+
+  if (
+    adminNote !==
+    undefined
+  ) {
+    updateData.admin_note =
+      cleanString(
+        adminNote
+      ) ||
+      null;
+  }
+
+
+  if (
+    status ===
+      "resolved" ||
+    status ===
+      "rejected"
+  ) {
+    updateData.resolved_at =
+      new Date().toISOString();
+  } else {
+    updateData.resolved_at =
+      null;
   }
 
 
@@ -1455,18 +1339,15 @@ export async function updateReportStatus(
   } =
     await supabaseAdmin
       .from("reports")
-      .update({
-        status,
-
-        updated_at:
-          new Date().toISOString(),
-      })
+      .update(
+        updateData
+      )
       .eq(
         "id",
         reportId
       )
       .select(
-        "*"
+        REPORT_SELECT
       )
       .single();
 
@@ -1474,6 +1355,8 @@ export async function updateReportStatus(
   if (error) {
     return {
       success: false,
+
+      data: null,
 
       error:
         error.message,
@@ -1484,7 +1367,8 @@ export async function updateReportStatus(
   return {
     success: true,
 
-    data,
+    data:
+      data as Report,
   };
 }
 
@@ -1495,33 +1379,28 @@ export async function updateReportStatus(
  * =========================================================
  *
  * Hanya developer.
+ *
+ * Admin tidak boleh menghapus report.
+ *
+ * =========================================================
  */
+
 export async function deleteReport(
   reportId: string
 ) {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      success: false,
-
-      error:
-        "Belum login.",
-    };
-  }
+  const context =
+    await requireAdmin();
 
 
   if (
-    profile.role !==
+    context.role !==
     "developer"
   ) {
     return {
       success: false,
 
       error:
-        "Hanya developer yang dapat menghapus laporan.",
+        "Hanya developer yang dapat menghapus report.",
     };
   }
 
@@ -1556,45 +1435,375 @@ export async function deleteReport(
 
 /**
  * =========================================================
- * REPORT COUNT
+ * AUTOMATIC FAILED LOGIN REPORT
  * =========================================================
  *
- * Berguna untuk badge:
+ * Dipanggil ketika akun mencapai 5x login gagal.
  *
- * "Report (5)"
+ * PENTING:
  *
- * Admin:
- * - hanya report user
+ * Function ini sengaja tidak memakai requireAuth()
+ * karena user mungkin belum berhasil login.
  *
- * Developer:
- * - user + admin
+ * =========================================================
  */
-export async function getPendingReportCount() {
-  const profile =
-    await getAuthProfile();
 
+export async function createFailedLoginReport(
+  input: {
+    username:
+      | string;
 
-  if (!profile) {
-    return {
-      success: false,
+    role:
+      | ReporterRole;
 
-      count: 0,
-    };
+    failedAttempts:
+      | number;
+
+    ipAddress?:
+      | string
+      | null;
+
+    userAgent?:
+      | string
+      | null;
+
+    accountId?:
+      | string
+      | null;
   }
+) {
+  const username =
+    cleanString(
+      input.username
+    );
 
 
-  const role =
-    profile.role as UserRole;
+  const failedAttempts =
+    Number(
+      input.failedAttempts
+    );
 
 
   if (
-    role !== "admin" &&
-    role !== "developer"
+    !username
   ) {
     return {
       success: false,
 
-      count: 0,
+      data: null,
+
+      error:
+        "Username tidak valid.",
+    };
+  }
+
+
+  if (
+    failedAttempts <
+    5
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Laporan otomatis hanya dibuat setelah minimal 5 kali percobaan gagal.",
+    };
+  }
+
+
+  if (
+    ![
+      "user",
+      "admin",
+      "developer",
+    ].includes(
+      input.role
+    )
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Role tidak valid.",
+    };
+  }
+
+
+  /**
+   * Jangan menyimpan password.
+   *
+   * Jangan pernah memasukkan password
+   * ke metadata laporan.
+   */
+
+  const metadata: Record<
+    string,
+    unknown
+  > = {
+    username,
+
+    failed_attempts:
+      failedAttempts,
+
+    ip_address:
+      input.ipAddress ??
+      null,
+
+    user_agent:
+      input.userAgent ??
+      null,
+
+    automatic:
+      true,
+
+    event:
+      "failed_login_threshold",
+  };
+
+
+  const result =
+    await createSystemReport({
+      type:
+        "login",
+
+      priority:
+        "high",
+
+      subject:
+        `Peringatan: ${failedAttempts}x percobaan login gagal`,
+
+      message:
+        `Terdeteksi ${failedAttempts} kali percobaan login gagal pada akun/username "${username}". Sistem membuat laporan otomatis untuk ditinjau admin/developer.`,
+
+      reporterId:
+        input.accountId ??
+        null,
+
+      reporterRole:
+        input.role,
+
+      metadata,
+    });
+
+
+  return result;
+}
+
+
+/**
+ * =========================================================
+ * REGISTRATION REPORT
+ * =========================================================
+ *
+ * Saat user melakukan Sign In/pendaftaran,
+ * data pendaftaran dapat dibuat sebagai report
+ * agar masuk ke Request & All Report.
+ *
+ * =========================================================
+ */
+
+export async function createRegistrationReport(
+  input: {
+    fullName: string;
+
+    address: string;
+
+    birthPlace:
+      | string;
+
+    birthDate:
+      | string;
+
+    parentWhatsapp:
+      | string;
+
+    gmail:
+      | string;
+
+    classLevel:
+      | number;
+
+    registrationId?:
+      | string
+      | null;
+  }
+) {
+  const fullName =
+    cleanString(
+      input.fullName
+    );
+
+  const address =
+    cleanString(
+      input.address
+    );
+
+  const birthPlace =
+    cleanString(
+      input.birthPlace
+    );
+
+  const birthDate =
+    cleanString(
+      input.birthDate
+    );
+
+  const parentWhatsapp =
+    cleanString(
+      input.parentWhatsapp
+    );
+
+  const gmail =
+    cleanString(
+      input.gmail
+    );
+
+  const classLevel =
+    Number(
+      input.classLevel
+    );
+
+
+  if (
+    !fullName ||
+    !address ||
+    !birthPlace ||
+    !birthDate ||
+    !parentWhatsapp ||
+    !gmail
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Semua data pendaftaran wajib diisi.",
+    };
+  }
+
+
+  if (
+    ![
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+    ].includes(
+      classLevel
+    )
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Kelas harus antara 1 sampai 6.",
+    };
+  }
+
+
+  /**
+   * Email validation sederhana.
+   */
+
+  if (
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
+      gmail
+    )
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Format Gmail tidak valid.",
+    };
+  }
+
+
+  const metadata = {
+    registration_id:
+      input.registrationId ??
+      null,
+
+    full_name:
+      fullName,
+
+    address,
+
+    birth_place:
+      birthPlace,
+
+    birth_date:
+      birthDate,
+
+    parent_whatsapp:
+      parentWhatsapp,
+
+    gmail,
+
+    class_level:
+      classLevel,
+
+    registration:
+      true,
+  };
+
+
+  return createSystemReport({
+    type:
+      "registration",
+
+    priority:
+      "normal",
+
+    subject:
+      `Pendaftaran akun baru - ${fullName}`,
+
+    message:
+      `Terdapat permintaan pendaftaran akun baru dari ${fullName}. Silakan periksa data pendaftaran dan lakukan persetujuan melalui halaman Set Web.`,
+
+    metadata,
+  });
+}
+
+
+/**
+ * =========================================================
+ * REPORT STATISTICS
+ * =========================================================
+ *
+ * Untuk dashboard admin/developer.
+ *
+ * =========================================================
+ */
+
+export async function getReportStatistics() {
+  const context =
+    await requireAdmin();
+
+
+  if (
+    !canViewAllReports(
+      context.role
+    )
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Anda tidak memiliki akses.",
     };
   }
 
@@ -1603,32 +1812,34 @@ export async function getPendingReportCount() {
     supabaseAdmin
       .from("reports")
       .select(
-        "id",
-        {
-          count:
-            "exact",
-          head: true,
-        }
-      )
-      .eq(
-        "status",
-        "pending"
+        `
+          id,
+          reporter_role,
+          type,
+          priority,
+          status
+        `
       );
 
 
+  /**
+   * Admin tidak melihat statistik developer.
+   */
+
   if (
-    role === "admin"
+    context.role ===
+    "admin"
   ) {
     query =
-      query.eq(
+      query.neq(
         "reporter_role",
-        "user"
+        "developer"
       );
   }
 
 
   const {
-    count,
+    data,
     error,
   } =
     await query;
@@ -1638,7 +1849,7 @@ export async function getPendingReportCount() {
     return {
       success: false,
 
-      count: 0,
+      data: null,
 
       error:
         error.message,
@@ -1646,10 +1857,306 @@ export async function getPendingReportCount() {
   }
 
 
+  const reports =
+    data ?? [];
+
+
+  const countBy =
+    (
+      key:
+        | "type"
+        | "priority"
+        | "status"
+        | "reporter_role"
+    ) => {
+      return reports.reduce(
+        (
+          result:
+            Record<
+              string,
+              number
+            >,
+          report
+        ) => {
+          const value =
+            String(
+              report[
+                key
+              ] ??
+              "unknown"
+            );
+
+          result[value] =
+            (
+              result[value] ??
+              0
+            ) + 1;
+
+          return result;
+        },
+        {}
+      );
+    };
+
+
   return {
     success: true,
 
-    count:
-      count ?? 0,
+    data: {
+      total:
+        reports.length,
+
+      pending:
+        reports.filter(
+          report =>
+            report.status ===
+            "pending"
+        ).length,
+
+      reviewed:
+        reports.filter(
+          report =>
+            report.status ===
+            "reviewed"
+        ).length,
+
+      processing:
+        reports.filter(
+          report =>
+            report.status ===
+            "processing"
+        ).length,
+
+      resolved:
+        reports.filter(
+          report =>
+            report.status ===
+            "resolved"
+        ).length,
+
+      rejected:
+        reports.filter(
+          report =>
+            report.status ===
+            "rejected"
+        ).length,
+
+      byType:
+        countBy(
+          "type"
+        ),
+
+      byPriority:
+        countBy(
+          "priority"
+        ),
+
+      byStatus:
+        countBy(
+          "status"
+        ),
+
+      byReporterRole:
+        countBy(
+          "reporter_role"
+        ),
+    },
   };
+}
+
+
+/**
+ * =========================================================
+ * CHECK IF AUTOMATIC LOGIN REPORT EXISTS
+ * =========================================================
+ *
+ * Mencegah satu akun membuat report otomatis
+ * setiap kali mencoba login setelah melewati 5x.
+ *
+ * Kita cek report otomatis terbaru.
+ *
+ * =========================================================
+ */
+
+export async function hasRecentFailedLoginReport(
+  username: string,
+  minutes = 30
+) {
+  const cleanUsername =
+    cleanString(
+      username
+    );
+
+
+  if (
+    !cleanUsername
+  ) {
+    return false;
+  }
+
+
+  const since =
+    new Date(
+      Date.now() -
+        minutes *
+          60 *
+          1000
+    ).toISOString();
+
+
+  const {
+    data,
+    error,
+  } =
+    await supabaseAdmin
+      .from("reports")
+      .select(
+        "id, metadata"
+      )
+      .eq(
+        "type",
+        "login"
+      )
+      .gte(
+        "created_at",
+        since
+      )
+      .order(
+        "created_at",
+        {
+          ascending:
+            false,
         }
+      )
+      .limit(50);
+
+
+  if (error) {
+    console.error(
+      "Failed login report check error:",
+      error
+    );
+
+    return false;
+  }
+
+
+  return (
+    data ??
+    []
+  ).some(
+    report => {
+      const metadata =
+        report.metadata as
+          | Record<
+              string,
+              unknown
+            >
+          | null;
+
+      return (
+        metadata?.automatic ===
+          true &&
+        metadata?.event ===
+          "failed_login_threshold" &&
+        metadata?.username ===
+          cleanUsername
+      );
+    }
+  );
+}
+
+
+/**
+ * =========================================================
+ * CREATE FAILED LOGIN REPORT IF NEEDED
+ * =========================================================
+ *
+ * Helper utama untuk login system.
+ *
+ * =========================================================
+ */
+
+export async function reportFailedLoginIfNeeded(
+  input: {
+    username:
+      | string;
+
+    role:
+      | ReporterRole;
+
+    failedAttempts:
+      | number;
+
+    ipAddress?:
+      | string
+      | null;
+
+    userAgent?:
+      | string
+      | null;
+
+    accountId?:
+      | string
+      | null;
+  }
+) {
+  const attempts =
+    Number(
+      input.failedAttempts
+    );
+
+
+  if (
+    attempts <
+    5
+  ) {
+    return {
+      success: true,
+
+      created: false,
+    };
+  }
+
+
+  /**
+   * Hindari spam report.
+   */
+
+  const alreadyReported =
+    await hasRecentFailedLoginReport(
+      input.username
+    );
+
+
+  if (
+    alreadyReported
+  ) {
+    return {
+      success: true,
+
+      created: false,
+    };
+  }
+
+
+  const result =
+    await createFailedLoginReport(
+      input
+    );
+
+
+  return {
+    success:
+      result.success,
+
+    created:
+      result.success,
+
+    report:
+      result.data ?? null,
+
+    error:
+      result.error,
+  };
+    }
