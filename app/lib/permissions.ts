@@ -1,1375 +1,1504 @@
-import { createClient } from "@/app/lib/supabase/server";
-import {
-  supabaseAdmin,
-} from "@/app/lib/supabase/admin";
-import {
-  getAuthProfile,
+import type {
+  UserRole,
 } from "@/app/lib/auth";
 
 /**
  * =========================================================
- * PERMISSIONS HELPER
+ * PERMISSIONS
  * =========================================================
  *
  * File:
  * app/lib/permissions.ts
  *
- * Mengatur:
- *
- * - Permission user
- * - Permission admin
- * - Permission developer
- * - Akses buku siswa
- * - Akses buku guru
- * - Permission membaca PDF
- * - Permission download PDF
- * - Permission laporan
- * - Permission history
- * - Permission setting web
- *
- * =========================================================
- */
-
-
-/**
- * =========================================================
- * TYPES
- * =========================================================
- */
-
-export type UserRole =
-  | "user"
-  | "admin"
-  | "developer";
-
-
-export type BookType =
-  | "student"
-  | "teacher";
-
-
-export type StudentBookCategory =
-  | "general"
-  | "religion";
-
-
-export type TeacherClass =
-  | 1
-  | 2
-  | 3
-  | 4
-  | 5
-  | 6;
-
-
-export type BookAction =
-  | "read"
-  | "download";
-
-
-/**
- * =========================================================
- * BOOK PERMISSION INTERFACE
- * =========================================================
- */
-
-export interface BookPermission {
-  canRead: boolean;
-
-  canDownload: boolean;
-
-  reason?: string;
-}
-
-
-/**
- * =========================================================
- * BASIC ROLE CHECK
- * =========================================================
- */
-
-export function isUserRole(
-  role: string | null | undefined
-) {
-  return role === "user";
-}
-
-
-export function isAdminRole(
-  role: string | null | undefined
-) {
-  return role === "admin";
-}
-
-
-export function isDeveloperRole(
-  role: string | null | undefined
-) {
-  return role === "developer";
-}
-
-
-export function isStaffRole(
-  role: string | null | undefined
-) {
-  return (
-    role === "admin" ||
-    role === "developer"
-  );
-}
-
-
-/**
- * =========================================================
- * CAN ACCESS CATEGORY
- * =========================================================
- *
- * Category membutuhkan login.
- */
-export function canAccessCategory(
-  role: UserRole | null
-) {
-  return Boolean(role);
-}
-
-
-/**
- * =========================================================
- * CAN ACCESS STUDENT BOOKS
- * =========================================================
- *
- * Buku siswa dapat dibaca oleh:
- *
+ * Role:
  * - user
  * - admin
  * - developer
+ *
+ * File ini dipakai untuk menentukan:
+ *
+ * - menu apa yang boleh muncul
+ * - halaman apa yang boleh dibuka
+ * - fitur apa yang boleh digunakan
+ *
+ * PENTING:
+ *
+ * File ini bukan pengganti RLS.
+ *
+ * UI permission:
+ * -> menyembunyikan menu
+ *
+ * Server authorization:
+ * -> mencegah akses sebenarnya
+ *
+ * Supabase RLS:
+ * -> lapisan keamanan database
+ *
+ * =========================================================
  */
-export function canAccessStudentBooks(
-  role: UserRole | null
+
+
+/**
+ * =========================================================
+ * PAGE PERMISSIONS
+ * =========================================================
+ */
+
+export type Permission =
+  | "home"
+  | "category"
+  | "history"
+  | "history_all"
+  | "history_all_admin"
+  | "report"
+  | "request_reports"
+  | "announcement"
+  | "my_account"
+  | "about_us"
+  | "contact_us"
+  | "set_web_admin"
+  | "set_web_developer"
+  | "developer_monitoring";
+
+
+/**
+ * =========================================================
+ * PERMISSION MAP
+ * =========================================================
+ */
+
+const PERMISSION_MAP: Record<
+  Permission,
+  UserRole[]
+> = {
+  /**
+   * Semua role
+   */
+
+  home: [
+    "user",
+    "admin",
+    "developer",
+  ],
+
+  category: [
+    "user",
+    "admin",
+    "developer",
+  ],
+
+  history: [
+    "user",
+    "admin",
+    "developer",
+  ],
+
+  report: [
+    "user",
+    "admin",
+    "developer",
+  ],
+
+  announcement: [
+    "user",
+    "admin",
+    "developer",
+  ],
+
+  my_account: [
+    "user",
+    "admin",
+    "developer",
+  ],
+
+  about_us: [
+    "user",
+    "admin",
+    "developer",
+  ],
+
+  contact_us: [
+    "user",
+    "admin",
+    "developer",
+  ],
+
+
+  /**
+   * Admin + Developer
+   */
+
+  history_all: [
+    "admin",
+    "developer",
+  ],
+
+  request_reports: [
+    "admin",
+    "developer",
+  ],
+
+  set_web_admin: [
+    "admin",
+    "developer",
+  ],
+
+
+  /**
+   * Developer only
+   */
+
+  history_all_admin: [
+    "developer",
+  ],
+
+  set_web_developer: [
+    "developer",
+  ],
+
+  developer_monitoring: [
+    "developer",
+  ],
+};
+
+
+/**
+ * =========================================================
+ * CHECK PERMISSION
+ * =========================================================
+ */
+
+export function hasPermission(
+  role: UserRole | null | undefined,
+  permission: Permission
 ) {
+  if (!role) {
+    return false;
+  }
+
+
   return (
-    role === "user" ||
-    role === "admin" ||
-    role === "developer"
+    PERMISSION_MAP[
+      permission
+    ]?.includes(role) ??
+    false
   );
 }
 
 
 /**
  * =========================================================
- * CAN ACCESS TEACHER BOOKS
+ * REQUIRE PERMISSION
  * =========================================================
  *
- * Buku guru tidak boleh diakses user biasa.
+ * Dipakai di server/API.
  *
- * Hanya:
- * - admin
- * - developer
+ * Jika tidak punya akses,
+ * function akan throw error.
  *
- * yang dapat mengelola/mengakses area buku guru.
- *
- * Nantinya jika sekolah ingin guru memiliki role
- * khusus "teacher", type dan logic ini bisa diperluas.
+ * =========================================================
  */
-export function canAccessTeacherBooks(
-  role: UserRole | null
+
+export function requirePermission(
+  role:
+    | UserRole
+    | null
+    | undefined,
+  permission: Permission
+) {
+  if (
+    !hasPermission(
+      role,
+      permission
+    )
+  ) {
+    throw new Error(
+      "FORBIDDEN"
+    );
+  }
+
+
+  return true;
+}
+
+
+/**
+ * =========================================================
+ * ROLE CHECK
+ * =========================================================
+ */
+
+export function isUser(
+  role:
+    | UserRole
+    | null
+    | undefined
 ) {
   return (
-    role === "admin" ||
-    role === "developer"
+    role ===
+    "user"
+  );
+}
+
+
+export function isAdmin(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return (
+    role ===
+      "admin"
+  );
+}
+
+
+export function isDeveloper(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return (
+    role ===
+    "developer"
+  );
+}
+
+
+export function isAdminOrDeveloper(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return (
+    role ===
+      "admin" ||
+    role ===
+      "developer"
   );
 }
 
 
 /**
  * =========================================================
- * CAN MANAGE BOOKS
+ * ROLE HIERARCHY
  * =========================================================
  *
- * Admin dan developer dapat:
+ * Developer memiliki level tertinggi.
  *
- * - tambah buku
- * - edit judul
- * - edit sinopsis
- * - ganti PDF
- * - hapus buku
- * - ubah permission download
+ * user:
+ *   level 1
+ *
+ * admin:
+ *   level 2
+ *
+ * developer:
+ *   level 3
+ *
+ * =========================================================
  */
-export function canManageBooks(
-  role: UserRole | null
+
+export function getRoleLevel(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  switch (role) {
+    case "user":
+      return 1;
+
+    case "admin":
+      return 2;
+
+    case "developer":
+      return 3;
+
+    default:
+      return 0;
+  }
+}
+
+
+/**
+ * =========================================================
+ * CHECK ROLE HIERARCHY
+ * =========================================================
+ */
+
+export function hasMinimumRole(
+  role:
+    | UserRole
+    | null
+    | undefined,
+  minimumRole: UserRole
 ) {
   return (
-    role === "admin" ||
-    role === "developer"
+    getRoleLevel(
+      role
+    ) >=
+    getRoleLevel(
+      minimumRole
+    )
   );
 }
 
 
 /**
  * =========================================================
- * CAN MANAGE ANNOUNCEMENT
+ * USER FEATURES
  * =========================================================
  */
 
-export function canManageAnnouncement(
-  role: UserRole | null
+export const USER_FEATURES = {
+  VIEW_HOME:
+    "home",
+
+  VIEW_CATEGORY:
+    "category",
+
+  VIEW_HISTORY:
+    "history",
+
+  SEND_REPORT:
+    "report",
+
+  VIEW_ANNOUNCEMENT:
+    "announcement",
+
+  VIEW_MY_ACCOUNT:
+    "my_account",
+
+  VIEW_ABOUT:
+    "about_us",
+
+  VIEW_CONTACT:
+    "contact_us",
+} as const;
+
+
+/**
+ * =========================================================
+ * ADMIN FEATURES
+ * =========================================================
+ */
+
+export const ADMIN_FEATURES = {
+  VIEW_ALL_HISTORY:
+    "history_all",
+
+  VIEW_REPORTS:
+    "request_reports",
+
+  SET_WEB:
+    "set_web_admin",
+} as const;
+
+
+/**
+ * =========================================================
+ * DEVELOPER FEATURES
+ * =========================================================
+ */
+
+export const DEVELOPER_FEATURES = {
+  VIEW_ALL_HISTORY:
+    "history_all",
+
+  VIEW_ADMIN_HISTORY:
+    "history_all_admin",
+
+  VIEW_REPORTS:
+    "request_reports",
+
+  SET_WEB:
+    "set_web_admin",
+
+  SET_WEB_DEVELOPER:
+    "set_web_developer",
+
+  MONITORING:
+    "developer_monitoring",
+} as const;
+
+
+/**
+ * =========================================================
+ * GET MENU PERMISSIONS
+ * =========================================================
+ */
+
+export function getAllowedPermissions(
+  role:
+    | UserRole
+    | null
+    | undefined
 ) {
+  if (!role) {
+    return [];
+  }
+
+
   return (
-    role === "admin" ||
-    role === "developer"
+    Object.keys(
+      PERMISSION_MAP
+    ) as Permission[]
+  ).filter(
+    (
+      permission
+    ) =>
+      hasPermission(
+        role,
+        permission
+      )
   );
 }
 
 
 /**
  * =========================================================
- * CAN MANAGE REPORT
+ * GET ROLE MENU
+ * =========================================================
+ *
+ * Digunakan toolbar/navbar.
+ *
+ * =========================================================
+ */
+
+export interface RoleMenuItem {
+  key: string;
+
+  label: string;
+
+  href: string;
+
+  permission: Permission;
+}
+
+
+export function getRoleMenu(
+  role:
+    | UserRole
+    | null
+    | undefined
+): RoleMenuItem[] {
+  if (!role) {
+    return [
+      {
+        key:
+          "home",
+
+        label:
+          "Home",
+
+        href:
+          "/home",
+
+        permission:
+          "home",
+      },
+
+      {
+        key:
+          "about",
+
+        label:
+          "About Us",
+
+        href:
+          "/about-us",
+
+        permission:
+          "about_us",
+      },
+
+      {
+        key:
+          "contact",
+
+        label:
+          "Contact Us",
+
+        href:
+          "/contact-us",
+
+        permission:
+          "contact_us",
+      },
+
+      {
+        key:
+          "login",
+
+        label:
+          "Login",
+
+        href:
+          "/login",
+
+        permission:
+          "home",
+      },
+    ];
+  }
+
+
+  const menu: RoleMenuItem[] = [
+    {
+      key:
+        "home",
+
+      label:
+        "Home",
+
+      href:
+        "/home",
+
+      permission:
+        "home",
+    },
+
+    {
+      key:
+        "category",
+
+      label:
+        "Category",
+
+      href:
+        "/category",
+
+      permission:
+        "category",
+    },
+
+    {
+      key:
+        "announcement",
+
+      label:
+        "Announcement",
+
+      href:
+        "/announcement",
+
+      permission:
+        "announcement",
+    },
+
+    {
+      key:
+        "history",
+
+      label:
+        "History",
+
+      href:
+        "/history",
+
+      permission:
+        "history",
+    },
+
+    {
+      key:
+        "report",
+
+      label:
+        "Report",
+
+      href:
+        "/report",
+
+      permission:
+        "report",
+    },
+
+    {
+      key:
+        "account",
+
+      label:
+        "My Account",
+
+      href:
+        "/my-account",
+
+      permission:
+        "my_account",
+    },
+
+    {
+      key:
+        "about",
+
+      label:
+        "About Us",
+
+      href:
+        "/about-us",
+
+      permission:
+        "about_us",
+    },
+
+    {
+      key:
+        "contact",
+
+      label:
+        "Contact Us",
+
+      href:
+        "/contact-us",
+
+      permission:
+        "contact_us",
+    },
+  ];
+
+
+  /**
+   * Admin menu.
+   */
+
+  if (
+    role ===
+      "admin" ||
+    role ===
+      "developer"
+  ) {
+    menu.push({
+      key:
+        "all-history",
+
+      label:
+        "History All User",
+
+      href:
+        "/history-all",
+
+      permission:
+        "history_all",
+    });
+
+
+    menu.push({
+      key:
+        "reports",
+
+      label:
+        "Request & All Report",
+
+      href:
+        "/request-all-report",
+
+      permission:
+        "request_reports",
+    });
+
+
+    menu.push({
+      key:
+        "set-web",
+
+      label:
+        "Set Web",
+
+      href:
+        "/set-web",
+
+      permission:
+        "set_web_admin",
+    });
+  }
+
+
+  /**
+   * Developer menu.
+   */
+
+  if (
+    role ===
+    "developer"
+  ) {
+    menu.push({
+      key:
+        "developer-history",
+
+      label:
+        "History Admin",
+
+      href:
+        "/history-all/admin",
+
+      permission:
+        "history_all_admin",
+    });
+
+
+    menu.push({
+      key:
+        "developer-monitoring",
+
+      label:
+        "Monitoring",
+
+      href:
+        "/developer/monitoring",
+
+      permission:
+        "developer_monitoring",
+    });
+
+
+    menu.push({
+      key:
+        "developer-settings",
+
+      label:
+        "Developer Settings",
+
+      href:
+        "/set-web/developer",
+
+      permission:
+        "set_web_developer",
+    });
+  }
+
+
+  return menu.filter(
+    (item) =>
+      hasPermission(
+        role,
+        item.permission
+      )
+  );
+}
+
+
+/**
+ * =========================================================
+ * PAGE ACCESS CHECK
+ * =========================================================
+ *
+ * Digunakan sebelum menampilkan halaman
+ * atau menjalankan server action.
+ *
+ * =========================================================
+ */
+
+export function canAccessPage(
+  role:
+    | UserRole
+    | null
+    | undefined,
+  pathname: string
+) {
+  if (
+    pathname ===
+    "/"
+  ) {
+    return true;
+  }
+
+
+  if (
+    pathname ===
+      "/home" ||
+    pathname.startsWith(
+      "/home/"
+    )
+  ) {
+    return true;
+  }
+
+
+  if (
+    pathname ===
+      "/about-us" ||
+    pathname.startsWith(
+      "/about-us/"
+    )
+  ) {
+    return true;
+  }
+
+
+  if (
+    pathname ===
+      "/contact-us" ||
+    pathname.startsWith(
+      "/contact-us/"
+    )
+  ) {
+    return true;
+  }
+
+
+  if (
+    pathname ===
+      "/login" ||
+    pathname.startsWith(
+      "/login/"
+    )
+  ) {
+    return true;
+  }
+
+
+  if (
+    pathname ===
+      "/sign-in" ||
+    pathname.startsWith(
+      "/sign-in/"
+    )
+  ) {
+    return true;
+  }
+
+
+  if (
+    pathname ===
+      "/login-admin" ||
+    pathname.startsWith(
+      "/login-admin/"
+    )
+  ) {
+    return true;
+  }
+
+
+  if (
+    pathname ===
+      "/login-developer" ||
+    pathname.startsWith(
+      "/login-developer/"
+    )
+  ) {
+    return true;
+  }
+
+
+  /**
+   * Category.
+   */
+
+  if (
+    pathname ===
+      "/category" ||
+    pathname.startsWith(
+      "/category/"
+    )
+  ) {
+    return hasPermission(
+      role,
+      "category"
+    );
+  }
+
+
+  /**
+   * User history.
+   */
+
+  if (
+    pathname ===
+      "/history" ||
+    pathname.startsWith(
+      "/history/"
+    )
+  ) {
+    return hasPermission(
+      role,
+      "history"
+    );
+  }
+
+
+  /**
+   * Report.
+   */
+
+  if (
+    pathname ===
+      "/report" ||
+    pathname.startsWith(
+      "/report/"
+    )
+  ) {
+    return hasPermission(
+      role,
+      "report"
+    );
+  }
+
+
+  /**
+   * Announcement.
+   */
+
+  if (
+    pathname ===
+      "/announcement" ||
+    pathname.startsWith(
+      "/announcement/"
+    )
+  ) {
+    return hasPermission(
+      role,
+      "announcement"
+    );
+  }
+
+
+  /**
+   * My Account.
+   */
+
+  if (
+    pathname ===
+      "/my-account" ||
+    pathname.startsWith(
+      "/my-account/"
+    )
+  ) {
+    return hasPermission(
+      role,
+      "my_account"
+    );
+  }
+
+
+  /**
+   * All History.
+   */
+
+  if (
+    pathname ===
+      "/history-all" ||
+    pathname.startsWith(
+      "/history-all/"
+    )
+  ) {
+    if (
+      pathname.startsWith(
+        "/history-all/admin"
+      )
+    ) {
+      return hasPermission(
+        role,
+        "history_all_admin"
+      );
+    }
+
+
+    return hasPermission(
+      role,
+      "history_all"
+    );
+  }
+
+
+  /**
+   * Reports.
+   */
+
+  if (
+    pathname ===
+      "/request-all-report" ||
+    pathname.startsWith(
+      "/request-all-report/"
+    )
+  ) {
+    return hasPermission(
+      role,
+      "request_reports"
+    );
+  }
+
+
+  /**
+   * Admin settings.
+   */
+
+  if (
+    pathname ===
+      "/set-web" ||
+    pathname.startsWith(
+      "/set-web/"
+    )
+  ) {
+    if (
+      pathname.startsWith(
+        "/set-web/developer"
+      )
+    ) {
+      return hasPermission(
+        role,
+        "set_web_developer"
+      );
+    }
+
+
+    return hasPermission(
+      role,
+      "set_web_admin"
+    );
+  }
+
+
+  /**
+   * Developer monitoring.
+   */
+
+  if (
+    pathname ===
+      "/developer/monitoring" ||
+    pathname.startsWith(
+      "/developer/monitoring/"
+    )
+  ) {
+    return hasPermission(
+      role,
+      "developer_monitoring"
+    );
+  }
+
+
+  /**
+   * Default:
+   * halaman yang belum didaftarkan dianggap
+   * tidak boleh diakses.
+   */
+
+  return false;
+}
+
+
+/**
+ * =========================================================
+ * REPORT VISIBILITY
  * =========================================================
  *
  * User:
- * - dapat membuat report
+ * -> hanya report miliknya
  *
  * Admin:
- * - dapat melihat semua report
+ * -> report user + admin
  *
  * Developer:
- * - dapat melihat semua report termasuk report admin
+ * -> semua report termasuk admin
+ *
+ * =========================================================
  */
-export function canCreateReport(
-  role: UserRole | null
-) {
-  return Boolean(role);
-}
-
 
 export function canViewAllReports(
-  role: UserRole | null
+  role:
+    | UserRole
+    | null
+    | undefined
 ) {
   return (
-    role === "admin" ||
-    role === "developer"
+    role ===
+      "admin" ||
+    role ===
+      "developer"
   );
 }
 
 
 export function canViewAdminReports(
-  role: UserRole | null
+  role:
+    | UserRole
+    | null
+    | undefined
 ) {
-  return role === "developer";
+  return (
+    role ===
+    "developer"
+  );
 }
 
 
 /**
  * =========================================================
- * HISTORY PERMISSION
+ * HISTORY VISIBILITY
  * =========================================================
- *
- * User:
- * - hanya history sendiri
- *
- * Admin:
- * - history seluruh user
- * - tidak termasuk aktivitas sesama admin
- *
- * Developer:
- * - history user
- * - history admin
- * - seluruh aktivitas sistem yang diperbolehkan
  */
+
 export function canViewOwnHistory(
-  role: UserRole | null
+  role:
+    | UserRole
+    | null
+    | undefined
 ) {
-  return Boolean(role);
+  return Boolean(
+    role
+  );
 }
 
 
 export function canViewAllUserHistory(
-  role: UserRole | null
+  role:
+    | UserRole
+    | null
+    | undefined
 ) {
   return (
-    role === "admin" ||
-    role === "developer"
+    role ===
+      "admin" ||
+    role ===
+      "developer"
   );
 }
 
 
 export function canViewAdminHistory(
-  role: UserRole | null
-) {
-  return role === "developer";
-}
-
-
-/**
- * =========================================================
- * WEB SETTINGS
- * =========================================================
- */
-
-export function canAccessAdminSettings(
-  role: UserRole | null
-) {
-  return role === "admin";
-}
-
-
-export function canAccessDeveloperSettings(
-  role: UserRole | null
-) {
-  return role === "developer";
-}
-
-
-/**
- * =========================================================
- * ADMIN ACCOUNT MANAGEMENT
- * =========================================================
- *
- * Hanya developer:
- *
- * - add admin
- * - delete admin
- * - edit admin
- * - reset admin password
- */
-export function canManageAdminAccounts(
-  role: UserRole | null
-) {
-  return role === "developer";
-}
-
-
-/**
- * =========================================================
- * DEVELOPER SETTINGS
- * =========================================================
- */
-
-export function canManageDeveloperSettings(
-  role: UserRole | null
-) {
-  return role === "developer";
-}
-
-
-/**
- * =========================================================
- * USER PROFILE
- * =========================================================
- *
- * User:
- * - edit profile sendiri
- *
- * Admin/developer:
- * - tidak menggunakan halaman profile user
- * - account admin/developer hanya username/password
- */
-export function canEditOwnProfile(
-  role: UserRole | null
-) {
-  return role === "user";
-}
-
-
-/**
- * =========================================================
- * DOWNLOAD PERMISSION
- * =========================================================
- *
- * Admin/developer dapat mengelola permission.
- *
- * User hanya boleh download apabila:
- *
- * book.allow_download === true
- */
-export function canManageDownloadPermission(
-  role: UserRole | null
+  role:
+    | UserRole
+    | null
+    | undefined
 ) {
   return (
-    role === "admin" ||
-    role === "developer"
+    role ===
+    "developer"
   );
 }
 
 
 /**
  * =========================================================
- * BOOK ACCESS RESULT
+ * BOOK MANAGEMENT
  * =========================================================
  */
 
-export interface BookAccessResult {
-  allowed: boolean;
-
-  reason?: string;
-
-  role?: UserRole;
-
-  action?: BookAction;
-}
-
-
-/**
- * =========================================================
- * GET CURRENT ROLE
- * =========================================================
- */
-
-export async function getCurrentRole() {
-  const profile =
-    await getAuthProfile();
-
-  if (!profile) {
-    return null;
-  }
-
-  if (
-    profile.status !==
-    "active"
-  ) {
-    return null;
-  }
-
-  return profile.role as UserRole;
-}
-
-
-/**
- * =========================================================
- * CHECK BOOK ACCESS
- * =========================================================
- *
- * Fungsi utama permission buku.
- *
- * Ini akan digunakan nanti oleh:
- *
- * /api/books/[id]/read
- *
- * /api/books/[id]/download
- *
- * Contoh:
- *
- * checkBookAccess(bookId, "read")
- *
- * checkBookAccess(bookId, "download")
- *
- * =========================================================
- */
-export async function checkBookAccess(
-  bookId: string,
-  action: BookAction
-): Promise<BookAccessResult> {
-  if (!bookId) {
-    return {
-      allowed: false,
-
-      reason:
-        "ID buku tidak valid.",
-
-      action,
-    };
-  }
-
-
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      allowed: false,
-
-      reason:
-        "Silakan login terlebih dahulu.",
-
-      action,
-    };
-  }
-
-
-  if (
-    profile.status !==
-    "active"
-  ) {
-    return {
-      allowed: false,
-
-      reason:
-        "Akun belum aktif atau telah dinonaktifkan.",
-
-      role:
-        profile.role as UserRole,
-
-      action,
-    };
-  }
-
-
-  const role =
-    profile.role as UserRole;
-
-
-  /**
-   * Ambil data buku.
-   */
-  const {
-    data: book,
-    error,
-  } =
-    await supabaseAdmin
-      .from("books")
-      .select(
-        `
-          id,
-          title,
-          book_type,
-          student_category,
-          teacher_class,
-          pdf_path,
-          allow_download,
-          is_active
-        `
-      )
-      .eq(
-        "id",
-        bookId
-      )
-      .maybeSingle();
-
-
-  if (error) {
-    console.error(
-      "checkBookAccess book error:",
-      error
-    );
-
-    return {
-      allowed: false,
-
-      reason:
-        "Gagal memeriksa data buku.",
-
-      role,
-
-      action,
-    };
-  }
-
-
-  if (!book) {
-    return {
-      allowed: false,
-
-      reason:
-        "Buku tidak ditemukan.",
-
-      role,
-
-      action,
-    };
-  }
-
-
-  /**
-   * Buku tidak aktif.
-   */
-  if (
-    book.is_active ===
-    false
-  ) {
-    return {
-      allowed: false,
-
-      reason:
-        "Buku sedang tidak tersedia.",
-
-      role,
-
-      action,
-    };
-  }
-
-
-  /**
-   * Tidak ada PDF.
-   */
-  if (!book.pdf_path) {
-    return {
-      allowed: false,
-
-      reason:
-        "File PDF buku belum tersedia.",
-
-      role,
-
-      action,
-    };
-  }
-
-
-  /**
-   * =======================================================
-   * BUKU GURU
-   * =======================================================
-   */
-  if (
-    book.book_type ===
-    "teacher"
-  ) {
-    /**
-     * User biasa tidak dapat mengakses.
-     */
-    if (
-      role === "user"
-    ) {
-      return {
-        allowed: false,
-
-        reason:
-          "Buku Guru hanya dapat diakses oleh akun yang memiliki izin.",
-
-        role,
-
-        action,
-      };
-    }
-  }
-
-
-  /**
-   * =======================================================
-   * READ
-   * =======================================================
-   *
-   * Semua role yang sudah lolos pengecekan
-   * dapat membaca buku.
-   *
-   * Permission download TIDAK mempengaruhi
-   * permission membaca.
-   */
-  if (
-    action === "read"
-  ) {
-    return {
-      allowed: true,
-
-      role,
-
-      action,
-    };
-  }
-
-
-  /**
-   * =======================================================
-   * DOWNLOAD
-   * =======================================================
-   *
-   * Download bergantung pada:
-   *
-   * books.allow_download
-   */
-  if (
-    action === "download"
-  ) {
-    /**
-     * Admin/developer tetap boleh download
-     * untuk kebutuhan pengelolaan.
-     */
-    if (
-      role === "admin" ||
-      role === "developer"
-    ) {
-      return {
-        allowed: true,
-
-        role,
-
-        action,
-      };
-    }
-
-
-    /**
-     * User biasa hanya boleh download
-     * jika buku mengizinkan download.
-     */
-    if (
-      book.allow_download ===
-      true
-    ) {
-      return {
-        allowed: true,
-
-        role,
-
-        action,
-      };
-    }
-
-
-    return {
-      allowed: false,
-
-      reason:
-        "Buku ini hanya dapat dibaca melalui website dan tidak dapat didownload.",
-
-      role,
-
-      action,
-    };
-  }
-
-
-  return {
-    allowed: false,
-
-    reason:
-      "Aksi buku tidak dikenali.",
-
-    role,
-
-    action,
-  };
-}
-
-
-/**
- * =========================================================
- * CAN READ BOOK
- * =========================================================
- */
-
-export async function canReadBook(
-  bookId: string
+export function canManageBooks(
+  role:
+    | UserRole
+    | null
+    | undefined
 ) {
-  const result =
-    await checkBookAccess(
-      bookId,
-      "read"
-    );
-
-  return result.allowed;
+  return (
+    role ===
+      "admin" ||
+    role ===
+      "developer"
+  );
 }
 
 
 /**
- * =========================================================
- * CAN DOWNLOAD BOOK
- * =========================================================
+ * Admin dapat mengelola buku.
+ *
+ * Developer juga dapat mengelola buku.
  */
 
-export async function canDownloadBook(
-  bookId: string
+export function canAddBook(
+  role:
+    | UserRole
+    | null
+    | undefined
 ) {
-  const result =
-    await checkBookAccess(
-      bookId,
-      "download"
-    );
+  return canManageBooks(
+    role
+  );
+}
 
-  return result.allowed;
+
+export function canEditBook(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return canManageBooks(
+    role
+  );
+}
+
+
+export function canDeleteBook(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return canManageBooks(
+    role
+  );
+}
+
+
+export function canReplaceBookPdf(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return canManageBooks(
+    role
+  );
+}
+
+
+export function canChangeDownloadPermission(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return canManageBooks(
+    role
+  );
 }
 
 
 /**
  * =========================================================
- * GET BOOK PERMISSION
+ * ANNOUNCEMENT MANAGEMENT
  * =========================================================
- *
- * Berguna untuk UI.
- *
- * Contoh hasil:
- *
- * {
- *   canRead: true,
- *   canDownload: false
- * }
  */
-export async function getBookPermission(
-  bookId: string
-): Promise<BookPermission> {
-  const readResult =
-    await checkBookAccess(
-      bookId,
-      "read"
-    );
 
-
-  if (
-    !readResult.allowed
-  ) {
-    return {
-      canRead: false,
-
-      canDownload: false,
-
-      reason:
-        readResult.reason,
-    };
-  }
-
-
-  const downloadResult =
-    await checkBookAccess(
-      bookId,
-      "download"
-    );
-
-
-  return {
-    canRead:
-      readResult.allowed,
-
-    canDownload:
-      downloadResult.allowed,
-
-    reason:
-      downloadResult.allowed
-        ? undefined
-        : downloadResult.reason,
-  };
+export function canManageAnnouncements(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return (
+    role ===
+      "admin" ||
+    role ===
+      "developer"
+  );
 }
 
 
 /**
  * =========================================================
- * CATEGORY ACCESS
+ * CONTACT MANAGEMENT
  * =========================================================
+ *
+ * Admin dan developer dapat mengatur contact.
  */
 
-export async function checkCategoryAccess() {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      allowed: false,
-
-      reason:
-        "Silakan login terlebih dahulu.",
-    };
-  }
-
-
-  if (
-    profile.status !==
-    "active"
-  ) {
-    return {
-      allowed: false,
-
-      reason:
-        "Akun belum aktif.",
-    };
-  }
-
-
-  return {
-    allowed: true,
-
-    role:
-      profile.role as UserRole,
-  };
+export function canManageContacts(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return (
+    role ===
+      "admin" ||
+    role ===
+      "developer"
+  );
 }
 
 
 /**
  * =========================================================
- * STUDENT CATEGORY ACCESS
+ * HOME BACKGROUND
+ * =========================================================
+ *
+ * HANYA DEVELOPER.
+ */
+
+export function canManageHomeBackground(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return (
+    role ===
+    "developer"
+  );
+}
+
+
+/**
+ * =========================================================
+ * ADMIN MANAGEMENT
+ * =========================================================
+ *
+ * HANYA DEVELOPER.
+ */
+
+export function canManageAdmins(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return (
+    role ===
+    "developer"
+  );
+}
+
+
+export function canAddAdmin(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return canManageAdmins(
+    role
+  );
+}
+
+
+export function canDeleteAdmin(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return canManageAdmins(
+    role
+  );
+}
+
+
+export function canEditAdmin(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return canManageAdmins(
+    role
+  );
+}
+
+
+/**
+ * =========================================================
+ * USER ACCOUNT MANAGEMENT
+ * =========================================================
+ *
+ * Admin/developer dapat mengatur username/password
+ * user sesuai fitur Set Web.
+ *
+ * User sendiri hanya dapat mengubah profile
+ * yang diperbolehkan.
+ */
+
+export function canManageUsers(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return (
+    role ===
+      "admin" ||
+    role ===
+      "developer"
+  );
+}
+
+
+/**
+ * =========================================================
+ * DEVELOPER MONITORING
+ * =========================================================
+ *
+ * Developer only.
+ */
+
+export function canViewMonitoring(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
+  return (
+    role ===
+    "developer"
+  );
+}
+
+
+/**
+ * =========================================================
+ * GET ROLE CAPABILITIES
+ * =========================================================
+ *
+ * Berguna untuk frontend apabila ingin
+ * mengetahui kemampuan user.
+ *
  * =========================================================
  */
 
-export async function checkStudentCategoryAccess() {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      allowed: false,
-
-      reason:
-        "Silakan login terlebih dahulu.",
-    };
-  }
-
-
-  if (
-    profile.status !==
-    "active"
-  ) {
-    return {
-      allowed: false,
-
-      reason:
-        "Akun belum aktif.",
-    };
-  }
-
-
+export function getRoleCapabilities(
+  role:
+    | UserRole
+    | null
+    | undefined
+) {
   return {
-    allowed:
-      canAccessStudentBooks(
-        profile.role as UserRole
+    canManageBooks:
+      canManageBooks(
+        role
       ),
 
-    role:
-      profile.role as UserRole,
-  };
-}
+    canManageAnnouncements:
+      canManageAnnouncements(
+        role
+      ),
 
+    canManageContacts:
+      canManageContacts(
+        role
+      ),
 
-/**
- * =========================================================
- * TEACHER CATEGORY ACCESS
- * =========================================================
- */
+    canManageUsers:
+      canManageUsers(
+        role
+      ),
 
-export async function checkTeacherCategoryAccess() {
-  const profile =
-    await getAuthProfile();
+    canManageAdmins:
+      canManageAdmins(
+        role
+      ),
 
+    canManageHomeBackground:
+      canManageHomeBackground(
+        role
+      ),
 
-  if (!profile) {
-    return {
-      allowed: false,
-
-      reason:
-        "Silakan login terlebih dahulu.",
-    };
-  }
-
-
-  if (
-    profile.status !==
-    "active"
-  ) {
-    return {
-      allowed: false,
-
-      reason:
-        "Akun belum aktif.",
-    };
-  }
-
-
-  const allowed =
-    canAccessTeacherBooks(
-      profile.role as UserRole
-    );
-
-
-  return {
-    allowed,
-
-    role:
-      profile.role as UserRole,
-
-    reason: allowed
-      ? undefined
-      : "Buku Guru hanya dapat diakses oleh akun admin/developer.",
-  };
-}
-
-
-/**
- * =========================================================
- * REPORT ACCESS
- * =========================================================
- */
-
-export async function checkReportAccess() {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      allowed: false,
-
-      reason:
-        "Silakan login terlebih dahulu.",
-    };
-  }
-
-
-  if (
-    profile.status !==
-    "active"
-  ) {
-    return {
-      allowed: false,
-
-      reason:
-        "Akun belum aktif.",
-    };
-  }
-
-
-  return {
-    allowed: canCreateReport(
-      profile.role as UserRole
-    ),
-
-    role:
-      profile.role as UserRole,
-  };
-}
-
-
-/**
- * =========================================================
- * ALL REPORT ACCESS
- * =========================================================
- */
-
-export async function checkAllReportAccess() {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      allowed: false,
-
-      reason:
-        "Silakan login terlebih dahulu.",
-    };
-  }
-
-
-  if (
-    profile.status !==
-    "active"
-  ) {
-    return {
-      allowed: false,
-
-      reason:
-        "Akun tidak aktif.",
-    };
-  }
-
-
-  const role =
-    profile.role as UserRole;
-
-
-  return {
-    allowed:
+    canViewAllReports:
       canViewAllReports(
         role
       ),
 
-    role,
-  };
-}
-
-
-/**
- * =========================================================
- * ADMIN REPORT ACCESS
- * =========================================================
- *
- * Report admin hanya dapat dipantau developer.
- */
-export async function checkAdminReportAccess() {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      allowed: false,
-
-      reason:
-        "Silakan login terlebih dahulu.",
-    };
-  }
-
-
-  const role =
-    profile.role as UserRole;
-
-
-  return {
-    allowed:
+    canViewAdminReports:
       canViewAdminReports(
         role
       ),
 
-    role,
+    canViewAllUserHistory:
+      canViewAllUserHistory(
+        role
+      ),
+
+    canViewAdminHistory:
+      canViewAdminHistory(
+        role
+      ),
+
+    canViewMonitoring:
+      canViewMonitoring(
+        role
+      ),
   };
-}
-
-
-/**
- * =========================================================
- * HISTORY ACCESS
- * =========================================================
- */
-
-export async function checkHistoryAccess(
-  targetUserId?: string
-) {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      allowed: false,
-
-      reason:
-        "Silakan login terlebih dahulu.",
-    };
-  }
-
-
-  if (
-    profile.status !==
-    "active"
-  ) {
-    return {
-      allowed: false,
-
-      reason:
-        "Akun tidak aktif.",
-    };
-  }
-
-
-  const role =
-    profile.role as UserRole;
-
-
-  /**
-   * Tidak ada target =
-   * history milik sendiri.
-   */
-  if (
-    !targetUserId ||
-    targetUserId ===
-      profile.id
-  ) {
-    return {
-      allowed:
-        canViewOwnHistory(
-          role
-        ),
-
-      role,
-
-      own: true,
-    };
-  }
-
-
-  /**
-   * History orang lain.
-   */
-  if (
-    role === "developer"
-  ) {
-    return {
-      allowed: true,
-
-      role,
-
-      own: false,
-    };
-  }
-
-
-  if (
-    role === "admin"
-  ) {
-    /**
-     * Admin hanya dapat memantau user biasa.
-     *
-     * Untuk memastikan target benar-benar user,
-     * pengecekan database dilakukan di bawah.
-     */
-    const {
-      data: target,
-    } =
-      await supabaseAdmin
-        .from("profiles")
-        .select(
-          "id, role"
-        )
-        .eq(
-          "id",
-          targetUserId
-        )
-        .maybeSingle();
-
-
-    if (
-      !target
-    ) {
-      return {
-        allowed: false,
-
-        reason:
-          "User tidak ditemukan.",
-
-        role,
-
-        own: false,
-      };
-    }
-
-
-    /**
-     * Admin TIDAK boleh memantau admin lain.
-     * Developer yang dapat memantau admin.
-     */
-    if (
-      target.role !==
-      "user"
-    ) {
-      return {
-        allowed: false,
-
-        reason:
-          "Admin tidak memiliki akses history akun admin/developer.",
-
-        role,
-
-        own: false,
-      };
-    }
-
-
-    return {
-      allowed: true,
-
-      role,
-
-      own: false,
-    };
-  }
-
-
-  return {
-    allowed: false,
-
-    reason:
-      "Anda tidak memiliki izin melihat history user lain.",
-
-    role,
-
-    own: false,
-  };
-}
-
-
-/**
- * =========================================================
- * SET WEB ACCESS
- * =========================================================
- */
-
-export async function checkSetWebAccess(
-  area:
-    | "admin"
-    | "developer"
-) {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      allowed: false,
-
-      reason:
-        "Silakan login terlebih dahulu.",
-    };
-  }
-
-
-  if (
-    profile.status !==
-    "active"
-  ) {
-    return {
-      allowed: false,
-
-      reason:
-        "Akun tidak aktif.",
-    };
-  }
-
-
-  if (
-    area === "developer"
-  ) {
-    return {
-      allowed:
-        profile.role ===
-        "developer",
-
-      role:
-        profile.role as UserRole,
-    };
-  }
-
-
-  return {
-    allowed:
-      profile.role ===
-      "admin",
-
-    role:
-      profile.role as UserRole,
-  };
-}
-
-
-/**
- * =========================================================
- * ADMIN ACCOUNT MANAGEMENT
- * =========================================================
- */
-
-export async function checkAdminManagementAccess() {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      allowed: false,
-
-      reason:
-        "Silakan login terlebih dahulu.",
-    };
-  }
-
-
-  if (
-    profile.status !==
-    "active"
-  ) {
-    return {
-      allowed: false,
-
-      reason:
-        "Akun tidak aktif.",
-    };
-  }
-
-
-  return {
-    allowed:
-      profile.role ===
-      "developer",
-
-    role:
-      profile.role as UserRole,
-  };
-    }
+        }
