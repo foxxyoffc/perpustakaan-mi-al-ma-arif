@@ -1,54 +1,37 @@
-import {
-  supabaseAdmin,
-} from "@/app/lib/supabase/admin";
-
-import {
-  getAuthUser,
-  getAuthProfile,
-} from "@/app/lib/auth";
-
-import {
-  checkHistoryAccess,
-} from "@/app/lib/permissions";
-
-
 /**
  * =========================================================
- * HISTORY HELPER
+ * HISTORY SERVICE
  * =========================================================
  *
  * File:
  * app/lib/history.ts
  *
- * Sistem history digunakan untuk mencatat aktivitas:
- *
- * USER
- * - login
- * - logout
- * - gagal login
- * - membaca buku
- * - download buku
- * - report
- * - edit profile
- * - ganti password
- * - dll.
- *
- * ADMIN
- * - login
- * - logout
- * - tambah/edit/hapus buku
- * - upload/ganti PDF
- * - ubah izin download
- * - membuat pengumuman
- * - mengelola user
- * - report
- * - dll.
- *
- * DEVELOPER
- * - seluruh aktivitas yang relevan
+ * Fungsi:
+ * - Mencatat aktivitas user
+ * - Mencatat aktivitas admin
+ * - Mencatat aktivitas developer
+ * - User hanya dapat melihat history miliknya
+ * - Admin dapat melihat history user
+ * - Developer dapat melihat history user + admin + developer
+ * - History dapat difilter
  *
  * =========================================================
  */
+
+import {
+  requireAdmin,
+  requireAuth,
+} from "@/app/lib/auth";
+
+import {
+  supabaseAdmin,
+} from "@/app/lib/supabase/admin";
+
+import {
+  canViewAllHistory,
+  canViewAdminHistory,
+  canViewDeveloperHistory,
+} from "@/app/lib/permissions";
 
 
 /**
@@ -57,7 +40,7 @@ import {
  * =========================================================
  */
 
-export type HistoryActorRole =
+export type HistoryRole =
   | "user"
   | "admin"
   | "developer";
@@ -65,117 +48,430 @@ export type HistoryActorRole =
 
 export type HistoryAction =
   | "login"
-  | "login_failed"
-  | "login_locked"
   | "logout"
-
+  | "login_failed"
   | "register"
-  | "account_approved"
-  | "account_rejected"
-  | "account_suspended"
-  | "account_unsuspended"
-
-  | "profile_updated"
-  | "password_changed"
-  | "username_changed"
-  | "avatar_updated"
-
-  | "book_viewed"
-  | "book_downloaded"
-
-  | "book_created"
-  | "book_updated"
-  | "book_deleted"
-
-  | "book_title_updated"
-  | "book_synopsis_updated"
-  | "book_pdf_uploaded"
-  | "book_pdf_replaced"
-  | "book_pdf_deleted"
-
-  | "book_download_permission_enabled"
-  | "book_download_permission_disabled"
-
-  | "announcement_created"
-  | "announcement_updated"
-  | "announcement_deleted"
-
-  | "report_created"
-  | "report_viewed"
-  | "report_updated"
-  | "report_deleted"
-
-  | "admin_created"
-  | "admin_updated"
-  | "admin_deleted"
-
-  | "background_updated"
-  | "contact_updated"
-  | "school_info_updated"
-  | "settings_updated"
-
-  | "security_alert"
-
-  | "other";
-
-
-export type HistoryEntityType =
-  | "user"
-  | "admin"
-  | "developer"
-  | "book"
-  | "report"
-  | "announcement"
-  | "settings"
+  | "profile_update"
+  | "password_change"
+  | "password_reset"
+  | "book_view"
+  | "book_download"
+  | "book_upload"
+  | "book_replace"
+  | "book_delete"
+  | "book_update"
+  | "book_create"
+  | "book_activate"
+  | "book_deactivate"
+  | "report_create"
+  | "report_update"
+  | "report_delete"
+  | "user_create"
+  | "user_update"
+  | "user_delete"
+  | "user_activate"
+  | "user_deactivate"
+  | "admin_create"
+  | "admin_update"
+  | "admin_delete"
+  | "setting_update"
+  | "announcement_create"
+  | "announcement_update"
+  | "announcement_delete"
   | "system"
   | "other";
 
 
-/**
- * =========================================================
- * INPUT
- * =========================================================
- */
+export interface History {
+  id: string;
 
-export interface CreateHistoryInput {
-  action: HistoryAction;
+  user_id:
+    | string
+    | null;
+
+  role:
+    | HistoryRole
+    | null;
+
+  action:
+    | HistoryAction;
 
   description: string;
 
-  entityType?:
-    | HistoryEntityType
-    | null;
-
-  entityId?:
+  target_type:
     | string
     | null;
 
-  metadata?:
+  target_id:
+    | string
+    | null;
+
+  metadata:
     | Record<string, unknown>
     | null;
 
-  ipAddress?:
+  ip_address:
     | string
     | null;
 
-  userAgent?:
+  user_agent:
     | string
     | null;
+
+  created_at: string;
 }
 
 
 /**
  * =========================================================
- * RESULT
+ * CONSTANTS
  * =========================================================
  */
 
-export interface HistoryResult {
-  success: boolean;
+const HISTORY_SELECT = `
+  id,
+  user_id,
+  role,
+  action,
+  description,
+  target_type,
+  target_id,
+  metadata,
+  ip_address,
+  user_agent,
+  created_at
+`;
 
-  id?: string;
 
-  error?: string;
+/**
+ * =========================================================
+ * HELPERS
+ * =========================================================
+ */
+
+function cleanString(
+  value: unknown
+) {
+  if (
+    typeof value !==
+    "string"
+  ) {
+    return "";
+  }
+
+  return value.trim();
+}
+
+
+function isHistoryRole(
+  value: unknown
+): value is HistoryRole {
+  return [
+    "user",
+    "admin",
+    "developer",
+  ].includes(
+    value as string
+  );
+}
+
+
+function isHistoryAction(
+  value: unknown
+): value is HistoryAction {
+  return [
+    "login",
+    "logout",
+    "login_failed",
+    "register",
+    "profile_update",
+    "password_change",
+    "password_reset",
+    "book_view",
+    "book_download",
+    "book_upload",
+    "book_replace",
+    "book_delete",
+    "book_update",
+    "book_create",
+    "book_activate",
+    "book_deactivate",
+    "report_create",
+    "report_update",
+    "report_delete",
+    "user_create",
+    "user_update",
+    "user_delete",
+    "user_activate",
+    "user_deactivate",
+    "admin_create",
+    "admin_update",
+    "admin_delete",
+    "setting_update",
+    "announcement_create",
+    "announcement_update",
+    "announcement_delete",
+    "system",
+    "other",
+  ].includes(
+    value as string
+  );
+}
+
+
+/**
+ * =========================================================
+ * CREATE HISTORY
+ * =========================================================
+ *
+ * Digunakan oleh server-side actions / API.
+ *
+ * Jangan menerima password atau token sebagai metadata.
+ *
+ * =========================================================
+ */
+
+export async function createHistory(
+  input: {
+    userId?:
+      | string
+      | null;
+
+    role?:
+      | HistoryRole
+      | null;
+
+    action:
+      | HistoryAction;
+
+    description: string;
+
+    targetType?:
+      | string
+      | null;
+
+    targetId?:
+      | string
+      | null;
+
+    metadata?:
+      | Record<string, unknown>;
+
+    ipAddress?:
+      | string
+      | null;
+
+    userAgent?:
+      | string
+      | null;
+  }
+) {
+  if (
+    !isHistoryAction(
+      input.action
+    )
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Jenis aktivitas tidak valid.",
+    };
+  }
+
+
+  const description =
+    cleanString(
+      input.description
+    );
+
+
+  if (
+    !description
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Deskripsi aktivitas wajib diisi.",
+    };
+  }
+
+
+  if (
+    description.length >
+    1000
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Deskripsi aktivitas terlalu panjang.",
+    };
+  }
+
+
+  if (
+    input.role !==
+      undefined &&
+    input.role !==
+      null &&
+    !isHistoryRole(
+      input.role
+    )
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Role tidak valid.",
+    };
+  }
+
+
+  /**
+   * Metadata dibersihkan dari
+   * field sensitif.
+   */
+
+  const metadata =
+    sanitizeMetadata(
+      input.metadata
+    );
+
+
+  const {
+    data,
+    error,
+  } =
+    await supabaseAdmin
+      .from("history")
+      .insert({
+        user_id:
+          input.userId ??
+          null,
+
+        role:
+          input.role ??
+          null,
+
+        action:
+          input.action,
+
+        description,
+
+        target_type:
+          cleanString(
+            input.targetType
+          ) ||
+          null,
+
+        target_id:
+          cleanString(
+            input.targetId
+          ) ||
+          null,
+
+        metadata,
+
+        ip_address:
+          cleanString(
+            input.ipAddress
+          ) ||
+          null,
+
+        user_agent:
+          cleanString(
+            input.userAgent
+          ) ||
+          null,
+      })
+      .select(
+        HISTORY_SELECT
+      )
+      .single();
+
+
+  if (error) {
+    console.error(
+      "createHistory error:",
+      error
+    );
+
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        error.message,
+    };
+  }
+
+
+  return {
+    success: true,
+
+    data:
+      data as History,
+  };
+}
+
+
+/**
+ * =========================================================
+ * CREATE HISTORY FOR CURRENT USER
+ * =========================================================
+ */
+
+export async function createMyHistory(
+  input: {
+    action:
+      | HistoryAction;
+
+    description: string;
+
+    targetType?:
+      | string
+      | null;
+
+    targetId?:
+      | string
+      | null;
+
+    metadata?:
+      | Record<string, unknown>;
+
+    ipAddress?:
+      | string
+      | null;
+
+    userAgent?:
+      | string
+      | null;
+  }
+) {
+  const context =
+    await requireAuth();
+
+
+  return createHistory({
+    ...input,
+
+    userId:
+      context.userId,
+
+    role:
+      context.role,
+  });
 }
 
 
@@ -184,51 +480,46 @@ export interface HistoryResult {
  * SANITIZE METADATA
  * =========================================================
  *
- * Jangan menyimpan:
- *
+ * Jangan pernah menyimpan:
  * - password
- * - service role key
- * - access token
- * - refresh token
+ * - access_token
+ * - refresh_token
+ * - service_role_key
  * - secret
  *
- * ke history.
+ * =========================================================
  */
+
 function sanitizeMetadata(
-  metadata:
+  metadata?:
     | Record<string, unknown>
-    | null
-    | undefined
 ) {
-  if (!metadata) {
+  if (
+    !metadata
+  ) {
     return null;
   }
 
 
-  const sanitized: Record<
+  const forbiddenKeys =
+    new Set([
+      "password",
+      "confirm_password",
+      "access_token",
+      "refresh_token",
+      "service_role_key",
+      "supabase_service_role_key",
+      "token",
+      "secret",
+      "api_key",
+      "apikey",
+    ]);
+
+
+  const result: Record<
     string,
     unknown
   > = {};
-
-
-  const forbiddenKeys = [
-    "password",
-    "new_password",
-    "old_password",
-    "confirm_password",
-
-    "access_token",
-    "refresh_token",
-
-    "service_role_key",
-    "supabase_service_role_key",
-
-    "secret",
-    "api_key",
-    "apikey",
-
-    "token",
-  ];
 
 
   for (
@@ -240,7 +531,7 @@ function sanitizeMetadata(
     )
   ) {
     if (
-      forbiddenKeys.includes(
+      forbiddenKeys.has(
         key.toLowerCase()
       )
     ) {
@@ -248,1123 +539,71 @@ function sanitizeMetadata(
     }
 
 
-    sanitized[key] =
+    result[key] =
       value;
   }
 
 
-  return sanitized;
+  return result;
 }
 
 
 /**
  * =========================================================
- * CREATE HISTORY
- * =========================================================
- *
- * Fungsi utama.
- *
- * Biasanya dipanggil setelah sebuah aktivitas berhasil.
- */
-export async function createHistory(
-  input: CreateHistoryInput
-): Promise<HistoryResult> {
-  try {
-    const user =
-      await getAuthUser();
-
-    const profile =
-      await getAuthProfile();
-
-
-    /**
-     * History dapat berasal dari user yang sudah login.
-     *
-     * Untuk aktivitas seperti login gagal, caller dapat
-     * menggunakan createSecurityHistory() karena pada
-     * kondisi tersebut session belum tentu tersedia.
-     */
-    if (!user || !profile) {
-      return {
-        success: false,
-
-        error:
-          "User/session tidak ditemukan.",
-      };
-    }
-
-
-    const metadata =
-      sanitizeMetadata(
-        input.metadata
-      );
-
-
-    /**
-     * Struktur mengikuti tabel history.
-     *
-     * Kolom tambahan seperti ip/user-agent boleh NULL.
-     */
-    const {
-      data,
-      error,
-    } =
-      await supabaseAdmin
-        .from("history")
-        .insert({
-          user_id:
-            user.id,
-
-          actor_role:
-            profile.role,
-
-          action:
-            input.action,
-
-          description:
-            input.description,
-
-          entity_type:
-            input.entityType ??
-            null,
-
-          entity_id:
-            input.entityId ??
-            null,
-
-          metadata,
-
-          ip_address:
-            input.ipAddress ??
-            null,
-
-          user_agent:
-            input.userAgent ??
-            null,
-        })
-        .select(
-          "id"
-        )
-        .single();
-
-
-    if (error) {
-      console.error(
-        "createHistory error:",
-        error
-      );
-
-      return {
-        success: false,
-
-        error:
-          error.message,
-      };
-    }
-
-
-    return {
-      success: true,
-
-      id: data.id,
-    };
-  } catch (error) {
-    console.error(
-      "createHistory exception:",
-      error
-    );
-
-
-    return {
-      success: false,
-
-      error:
-        error instanceof Error
-          ? error.message
-          : "Unknown error.",
-    };
-  }
-}
-
-
-/**
- * =========================================================
- * CREATE SECURITY HISTORY
- * =========================================================
- *
- * Dipakai untuk aktivitas sebelum user berhasil login.
- *
- * Contoh:
- * - username tidak ditemukan
- * - password salah
- * - login gagal 5x
- * - akun dikunci
- *
- * Jika profileId tersedia, aktivitas dikaitkan dengan
- * akun tersebut.
- */
-export async function createSecurityHistory(
-  input: {
-    action:
-      | "login_failed"
-      | "login_locked"
-      | "security_alert";
-
-    description: string;
-
-    profileId?:
-      | string
-      | null;
-
-    actorRole?:
-      | HistoryActorRole
-      | null;
-
-    metadata?:
-      | Record<string, unknown>
-      | null;
-
-    ipAddress?:
-      | string
-      | null;
-
-    userAgent?:
-      | string
-      | null;
-  }
-): Promise<HistoryResult> {
-  try {
-    const metadata =
-      sanitizeMetadata(
-        input.metadata
-      );
-
-
-    const {
-      data,
-      error,
-    } =
-      await supabaseAdmin
-        .from("history")
-        .insert({
-          user_id:
-            input.profileId ??
-            null,
-
-          actor_role:
-            input.actorRole ??
-            null,
-
-          action:
-            input.action,
-
-          description:
-            input.description,
-
-          entity_type:
-            "system",
-
-          entity_id:
-            null,
-
-          metadata,
-
-          ip_address:
-            input.ipAddress ??
-            null,
-
-          user_agent:
-            input.userAgent ??
-            null,
-        })
-        .select(
-          "id"
-        )
-        .single();
-
-
-    if (error) {
-      console.error(
-        "createSecurityHistory error:",
-        error
-      );
-
-      return {
-        success: false,
-
-        error:
-          error.message,
-      };
-    }
-
-
-    return {
-      success: true,
-
-      id: data.id,
-    };
-  } catch (error) {
-    console.error(
-      "createSecurityHistory exception:",
-      error
-    );
-
-
-    return {
-      success: false,
-
-      error:
-        error instanceof Error
-          ? error.message
-          : "Unknown error.",
-    };
-  }
-}
-
-
-/**
- * =========================================================
- * LOGIN HISTORY
+ * GET MY HISTORY
  * =========================================================
  */
 
-export async function historyLogin() {
-  return createHistory({
-    action:
-      "login",
-
-    description:
-      "Berhasil login ke sistem perpustakaan.",
-
-    entityType:
-      "user",
-  });
-}
-
-
-/**
- * =========================================================
- * LOGOUT HISTORY
- * =========================================================
- *
- * Dipanggil sebelum signOut.
- */
-export async function historyLogout() {
-  return createHistory({
-    action:
-      "logout",
-
-    description:
-      "Logout dari sistem perpustakaan.",
-
-    entityType:
-      "user",
-  });
-}
-
-
-/**
- * =========================================================
- * FAILED LOGIN HISTORY
- * =========================================================
- */
-
-export async function historyLoginFailed(
-  profileId:
-    | string
-    | null,
-  description: string,
-  metadata?:
-    | Record<string, unknown>
-    | null
-) {
-  return createSecurityHistory({
-    action:
-      "login_failed",
-
-    description,
-
-    profileId,
-
-    metadata,
-  });
-}
-
-
-/**
- * =========================================================
- * LOGIN LOCKED HISTORY
- * =========================================================
- */
-
-export async function historyLoginLocked(
-  profileId:
-    | string
-    | null,
-  description: string,
-  metadata?:
-    | Record<string, unknown>
-    | null
-) {
-  return createSecurityHistory({
-    action:
-      "login_locked",
-
-    description,
-
-    profileId,
-
-    metadata,
-  });
-}
-
-
-/**
- * =========================================================
- * BOOK VIEW HISTORY
- * =========================================================
- */
-
-export async function historyBookViewed(
-  bookId: string,
-  bookTitle?: string
-) {
-  return createHistory({
-    action:
-      "book_viewed",
-
-    description:
-      bookTitle
-        ? `Membuka buku "${bookTitle}".`
-        : "Membuka buku.",
-
-    entityType:
-      "book",
-
-    entityId:
-      bookId,
-
-    metadata: {
-      book_title:
-        bookTitle ??
-        null,
-    },
-  });
-}
-
-
-/**
- * =========================================================
- * BOOK DOWNLOAD HISTORY
- * =========================================================
- */
-
-export async function historyBookDownloaded(
-  bookId: string,
-  bookTitle?: string
-) {
-  return createHistory({
-    action:
-      "book_downloaded",
-
-    description:
-      bookTitle
-        ? `Mendownload buku "${bookTitle}".`
-        : "Mendownload buku.",
-
-    entityType:
-      "book",
-
-    entityId:
-      bookId,
-
-    metadata: {
-      book_title:
-        bookTitle ??
-        null,
-    },
-  });
-}
-
-
-/**
- * =========================================================
- * BOOK CREATED
- * =========================================================
- */
-
-export async function historyBookCreated(
-  bookId: string,
-  bookTitle: string
-) {
-  return createHistory({
-    action:
-      "book_created",
-
-    description:
-      `Menambahkan buku "${bookTitle}".`,
-
-    entityType:
-      "book",
-
-    entityId:
-      bookId,
-
-    metadata: {
-      book_title:
-        bookTitle,
-    },
-  });
-}
-
-
-/**
- * =========================================================
- * BOOK UPDATED
- * =========================================================
- */
-
-export async function historyBookUpdated(
-  bookId: string,
-  description: string,
-  metadata?:
-    | Record<string, unknown>
-    | null
-) {
-  return createHistory({
-    action:
-      "book_updated",
-
-    description,
-
-    entityType:
-      "book",
-
-    entityId:
-      bookId,
-
-    metadata,
-  });
-}
-
-
-/**
- * =========================================================
- * BOOK DELETED
- * =========================================================
- */
-
-export async function historyBookDeleted(
-  bookId: string,
-  bookTitle?: string
-) {
-  return createHistory({
-    action:
-      "book_deleted",
-
-    description:
-      bookTitle
-        ? `Menghapus buku "${bookTitle}".`
-        : "Menghapus buku.",
-
-    entityType:
-      "book",
-
-    entityId:
-      bookId,
-
-    metadata: {
-      book_title:
-        bookTitle ??
-        null,
-    },
-  });
-}
-
-
-/**
- * =========================================================
- * PDF UPLOADED
- * =========================================================
- */
-
-export async function historyBookPdfUploaded(
-  bookId: string,
-  bookTitle?: string
-) {
-  return createHistory({
-    action:
-      "book_pdf_uploaded",
-
-    description:
-      bookTitle
-        ? `Mengupload PDF buku "${bookTitle}".`
-        : "Mengupload PDF buku.",
-
-    entityType:
-      "book",
-
-    entityId:
-      bookId,
-
-    metadata: {
-      book_title:
-        bookTitle ??
-        null,
-    },
-  });
-}
-
-
-/**
- * =========================================================
- * PDF REPLACED
- * =========================================================
- */
-
-export async function historyBookPdfReplaced(
-  bookId: string,
-  bookTitle?: string
-) {
-  return createHistory({
-    action:
-      "book_pdf_replaced",
-
-    description:
-      bookTitle
-        ? `Mengganti file PDF buku "${bookTitle}".`
-        : "Mengganti file PDF buku.",
-
-    entityType:
-      "book",
-
-    entityId:
-      bookId,
-
-    metadata: {
-      book_title:
-        bookTitle ??
-        null,
-    },
-  });
-}
-
-
-/**
- * =========================================================
- * PDF DELETED
- * =========================================================
- */
-
-export async function historyBookPdfDeleted(
-  bookId: string,
-  bookTitle?: string
-) {
-  return createHistory({
-    action:
-      "book_pdf_deleted",
-
-    description:
-      bookTitle
-        ? `Menghapus file PDF buku "${bookTitle}".`
-        : "Menghapus file PDF buku.",
-
-    entityType:
-      "book",
-
-    entityId:
-      bookId,
-
-    metadata: {
-      book_title:
-        bookTitle ??
-        null,
-    },
-  });
-}
-
-
-/**
- * =========================================================
- * DOWNLOAD PERMISSION
- * =========================================================
- */
-
-export async function historyDownloadPermissionChanged(
-  bookId: string,
-  allowed: boolean,
-  bookTitle?: string
-) {
-  return createHistory({
-    action: allowed
-      ? "book_download_permission_enabled"
-      : "book_download_permission_disabled",
-
-    description:
-      allowed
-        ? `Mengizinkan download buku "${bookTitle ?? ""}".`
-        : `Menonaktifkan download buku "${bookTitle ?? ""}".`,
-
-    entityType:
-      "book",
-
-    entityId:
-      bookId,
-
-    metadata: {
-      book_title:
-        bookTitle ??
-        null,
-
-      allow_download:
-        allowed,
-    },
-  });
-}
-
-
-/**
- * =========================================================
- * PROFILE UPDATED
- * =========================================================
- */
-
-export async function historyProfileUpdated(
-  changedFields:
-    | string[]
-    | null
-) {
-  return createHistory({
-    action:
-      "profile_updated",
-
-    description:
-      "Memperbarui profil akun.",
-
-    entityType:
-      "user",
-
-    metadata: {
-      changed_fields:
-        changedFields ??
-        [],
-    },
-  });
-}
-
-
-/**
- * =========================================================
- * PASSWORD CHANGED
- * =========================================================
- */
-
-export async function historyPasswordChanged() {
-  return createHistory({
-    action:
-      "password_changed",
-
-    description:
-      "Mengganti password akun.",
-
-    entityType:
-      "user",
-  });
-}
-
-
-/**
- * =========================================================
- * USERNAME CHANGED
- * =========================================================
- */
-
-export async function historyUsernameChanged(
-  oldUsername?: string,
-  newUsername?: string
-) {
-  return createHistory({
-    action:
-      "username_changed",
-
-    description:
-      "Mengganti username akun.",
-
-    entityType:
-      "user",
-
-    metadata: {
-      old_username:
-        oldUsername ??
-        null,
-
-      new_username:
-        newUsername ??
-        null,
-    },
-  });
-}
-
-
-/**
- * =========================================================
- * AVATAR UPDATED
- * =========================================================
- */
-
-export async function historyAvatarUpdated() {
-  return createHistory({
-    action:
-      "avatar_updated",
-
-    description:
-      "Mengubah foto profil.",
-
-    entityType:
-      "user",
-  });
-}
-
-
-/**
- * =========================================================
- * REPORT CREATED
- * =========================================================
- */
-
-export async function historyReportCreated(
-  reportId: string,
-  reportTitle?: string
-) {
-  return createHistory({
-    action:
-      "report_created",
-
-    description:
-      reportTitle
-        ? `Mengirim laporan "${reportTitle}".`
-        : "Mengirim laporan.",
-
-    entityType:
-      "report",
-
-    entityId:
-      reportId,
-
-    metadata: {
-      report_title:
-        reportTitle ??
-        null,
-    },
-  });
-}
-
-
-/**
- * =========================================================
- * REPORT VIEWED
- * =========================================================
- */
-
-export async function historyReportViewed(
-  reportId: string
-) {
-  return createHistory({
-    action:
-      "report_viewed",
-
-    description:
-      "Melihat laporan.",
-
-    entityType:
-      "report",
-
-    entityId:
-      reportId,
-  });
-}
-
-
-/**
- * =========================================================
- * ANNOUNCEMENT
- * =========================================================
- */
-
-export async function historyAnnouncementCreated(
-  announcementId: string,
-  title: string
-) {
-  return createHistory({
-    action:
-      "announcement_created",
-
-    description:
-      `Membuat pengumuman "${title}".`,
-
-    entityType:
-      "announcement",
-
-    entityId:
-      announcementId,
-
-    metadata: {
-      title,
-    },
-  });
-}
-
-
-export async function historyAnnouncementUpdated(
-  announcementId: string,
-  title?: string
-) {
-  return createHistory({
-    action:
-      "announcement_updated",
-
-    description:
-      title
-        ? `Mengedit pengumuman "${title}".`
-        : "Mengedit pengumuman.",
-
-    entityType:
-      "announcement",
-
-    entityId:
-      announcementId,
-
-    metadata: {
-      title:
-        title ??
-        null,
-    },
-  });
-}
-
-
-export async function historyAnnouncementDeleted(
-  announcementId: string,
-  title?: string
-) {
-  return createHistory({
-    action:
-      "announcement_deleted",
-
-    description:
-      title
-        ? `Menghapus pengumuman "${title}".`
-        : "Menghapus pengumuman.",
-
-    entityType:
-      "announcement",
-
-    entityId:
-      announcementId,
-
-    metadata: {
-      title:
-        title ??
-        null,
-    },
-  });
-}
-
-
-/**
- * =========================================================
- * ADMIN ACCOUNT
- * =========================================================
- */
-
-export async function historyAdminCreated(
-  adminId: string,
-  username?: string
-) {
-  return createHistory({
-    action:
-      "admin_created",
-
-    description:
-      username
-        ? `Membuat akun admin "${username}".`
-        : "Membuat akun admin.",
-
-    entityType:
-      "admin",
-
-    entityId:
-      adminId,
-
-    metadata: {
-      username:
-        username ??
-        null,
-    },
-  });
-}
-
-
-export async function historyAdminUpdated(
-  adminId: string,
-  username?: string
-) {
-  return createHistory({
-    action:
-      "admin_updated",
-
-    description:
-      username
-        ? `Mengubah akun admin "${username}".`
-        : "Mengubah akun admin.",
-
-    entityType:
-      "admin",
-
-    entityId:
-      adminId,
-
-    metadata: {
-      username:
-        username ??
-        null,
-    },
-  });
-}
-
-
-export async function historyAdminDeleted(
-  adminId: string,
-  username?: string
-) {
-  return createHistory({
-    action:
-      "admin_deleted",
-
-    description:
-      username
-        ? `Menghapus akun admin "${username}".`
-        : "Menghapus akun admin.",
-
-    entityType:
-      "admin",
-
-    entityId:
-      adminId,
-
-    metadata: {
-      username:
-        username ??
-        null,
-    },
-  });
-}
-
-
-/**
- * =========================================================
- * SETTINGS
- * =========================================================
- */
-
-export async function historySettingsUpdated(
-  description: string,
-  metadata?:
-    | Record<string, unknown>
-    | null
-) {
-  return createHistory({
-    action:
-      "settings_updated",
-
-    description,
-
-    entityType:
-      "settings",
-
-    metadata,
-  });
-}
-
-
-/**
- * =========================================================
- * GET OWN HISTORY
- * =========================================================
- *
- * User hanya dapat mengambil history miliknya.
- */
-export async function getOwnHistory(
+export async function getMyHistory(
   options?: {
-    page?: number;
+    action?:
+      | HistoryAction;
+
+    search?: string;
 
     limit?: number;
 
-    action?:
-      | HistoryAction
-      | null;
+    offset?: number;
+
+    from?:
+      | string;
+
+    to?:
+      | string;
   }
 ) {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      success: false,
-
-      data: [],
-
-      total: 0,
-
-      error:
-        "Belum login.",
-    };
-  }
-
-
-  const page =
-    Math.max(
-      1,
-      options?.page ??
-        1
-    );
+  const context =
+    await requireAuth();
 
 
   const limit =
     Math.min(
-      100,
       Math.max(
-        1,
         options?.limit ??
-          20
-      )
+          50,
+        1
+      ),
+      100
     );
 
 
-  const from =
-    (page - 1) *
-    limit;
-
-  const to =
-    from +
-    limit -
-    1;
+  const offset =
+    Math.max(
+      options?.offset ??
+        0,
+      0
+    );
 
 
   let query =
     supabaseAdmin
       .from("history")
       .select(
-        "*",
-        {
-          count:
-            "exact",
-        }
+        HISTORY_SELECT
       )
       .eq(
         "user_id",
-        profile.id
+        context.userId
       )
       .order(
         "created_at",
@@ -1372,16 +611,28 @@ export async function getOwnHistory(
           ascending:
             false,
         }
-      )
-      .range(
-        from,
-        to
       );
 
 
   if (
     options?.action
   ) {
+    if (
+      !isHistoryAction(
+        options.action
+      )
+    ) {
+      return {
+        success: false,
+
+        data: [],
+
+        error:
+          "Jenis aktivitas tidak valid.",
+      };
+    }
+
+
     query =
       query.eq(
         "action",
@@ -1390,9 +641,60 @@ export async function getOwnHistory(
   }
 
 
+  if (
+    options?.search
+  ) {
+    const search =
+      cleanString(
+        options.search
+      );
+
+
+    if (
+      search
+    ) {
+      query =
+        query.ilike(
+          "description",
+          `%${search}%`
+        );
+    }
+  }
+
+
+  if (
+    options?.from
+  ) {
+    query =
+      query.gte(
+        "created_at",
+        options.from
+      );
+  }
+
+
+  if (
+    options?.to
+  ) {
+    query =
+      query.lte(
+        "created_at",
+        options.to
+      );
+  }
+
+
+  query =
+    query.range(
+      offset,
+      offset +
+        limit -
+        1
+    );
+
+
   const {
     data,
-    count,
     error,
   } =
     await query;
@@ -1404,8 +706,6 @@ export async function getOwnHistory(
 
       data: [],
 
-      total: 0,
-
       error:
         error.message,
     };
@@ -1416,163 +716,8 @@ export async function getOwnHistory(
     success: true,
 
     data:
-      data ?? [],
-
-    total:
-      count ?? 0,
-
-    page,
-
-    limit,
-  };
-}
-
-
-/**
- * =========================================================
- * GET USER HISTORY
- * =========================================================
- *
- * Digunakan admin/developer.
- *
- * Permission dicek terlebih dahulu.
- */
-export async function getUserHistory(
-  targetUserId: string,
-  options?: {
-    page?: number;
-
-    limit?: number;
-
-    action?:
-      | HistoryAction
-      | null;
-  }
-) {
-  const access =
-    await checkHistoryAccess(
-      targetUserId
-    );
-
-
-  if (
-    !access.allowed
-  ) {
-    return {
-      success: false,
-
-      data: [],
-
-      total: 0,
-
-      error:
-        access.reason ??
-        "Tidak memiliki akses.",
-    };
-  }
-
-
-  const page =
-    Math.max(
-      1,
-      options?.page ??
-        1
-    );
-
-
-  const limit =
-    Math.min(
-      100,
-      Math.max(
-        1,
-        options?.limit ??
-          20
-      )
-    );
-
-
-  const from =
-    (page - 1) *
-    limit;
-
-  const to =
-    from +
-    limit -
-    1;
-
-
-  let query =
-    supabaseAdmin
-      .from("history")
-      .select(
-        "*",
-        {
-          count:
-            "exact",
-        }
-      )
-      .eq(
-        "user_id",
-        targetUserId
-      )
-      .order(
-        "created_at",
-        {
-          ascending:
-            false,
-        }
-      )
-      .range(
-        from,
-        to
-      );
-
-
-  if (
-    options?.action
-  ) {
-    query =
-      query.eq(
-        "action",
-        options.action
-      );
-  }
-
-
-  const {
-    data,
-    count,
-    error,
-  } =
-    await query;
-
-
-  if (error) {
-    return {
-      success: false,
-
-      data: [],
-
-      total: 0,
-
-      error:
-        error.message,
-    };
-  }
-
-
-  return {
-    success: true,
-
-    data:
-      data ?? [],
-
-    total:
-      count ?? 0,
-
-    page,
-
-    limit,
+      (data ??
+        []) as History[],
   };
 }
 
@@ -1583,131 +728,83 @@ export async function getUserHistory(
  * =========================================================
  *
  * Admin:
- * - user biasa saja
+ *   dapat melihat history user.
  *
  * Developer:
- * - user + admin
+ *   dapat melihat history user.
  *
- * Tidak mengambil history developer.
+ * =========================================================
  */
+
 export async function getAllUserHistory(
   options?: {
-    page?: number;
+    userId?:
+      | string;
+
+    action?:
+      | HistoryAction;
+
+    search?: string;
 
     limit?: number;
 
-    role?:
-      | HistoryActorRole
-      | null;
+    offset?: number;
 
-    action?:
-      | HistoryAction
-      | null;
+    from?:
+      | string;
+
+    to?:
+      | string;
   }
 ) {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      success: false,
-
-      data: [],
-
-      total: 0,
-
-      error:
-        "Belum login.",
-    };
-  }
-
-
-  const role =
-    profile.role as HistoryActorRole;
+  const context =
+    await requireAdmin();
 
 
   if (
-    role !== "admin" &&
-    role !== "developer"
+    !canViewAllHistory(
+      context.role
+    )
   ) {
     return {
       success: false,
 
       data: [],
 
-      total: 0,
-
       error:
-        "Tidak memiliki akses.",
+        "Anda tidak memiliki akses ke history user.",
     };
   }
 
 
-  const page =
-    Math.max(
-      1,
-      options?.page ??
-        1
-    );
-
-
   const limit =
     Math.min(
-      100,
       Math.max(
-        1,
         options?.limit ??
-          50
-      )
+          100,
+        1
+      ),
+      200
     );
 
 
-  const from =
-    (page - 1) *
-    limit;
-
-  const to =
-    from +
-    limit -
-    1;
-
-
-  /**
-   * Admin:
-   *
-   * hanya melihat history user.
-   *
-   * Developer:
-   *
-   * melihat user + admin.
-   *
-   * Developer sendiri tidak ditampilkan.
-   */
-  const allowedRoles =
-    role === "developer"
-      ? [
-          "user",
-          "admin",
-        ]
-      : [
-          "user",
-        ];
+  const offset =
+    Math.max(
+      options?.offset ??
+        0,
+      0
+    );
 
 
   let query =
     supabaseAdmin
       .from("history")
       .select(
-        "*",
-        {
-          count:
-            "exact",
-        }
+        HISTORY_SELECT
       )
-      .in(
-        "actor_role",
-        allowedRoles
+      .eq(
+        "role",
+        "user"
       )
       .order(
         "created_at",
@@ -1715,36 +812,39 @@ export async function getAllUserHistory(
           ascending:
             false,
         }
-      )
-      .range(
-        from,
-        to
       );
 
 
-  /**
-   * Filter role tambahan.
-   */
   if (
-    options?.role &&
-    allowedRoles.includes(
-      options.role
-    )
+    options?.userId
   ) {
     query =
       query.eq(
-        "actor_role",
-        options.role
+        "user_id",
+        options.userId
       );
   }
 
 
-  /**
-   * Filter action.
-   */
   if (
     options?.action
   ) {
+    if (
+      !isHistoryAction(
+        options.action
+      )
+    ) {
+      return {
+        success: false,
+
+        data: [],
+
+        error:
+          "Jenis aktivitas tidak valid.",
+      };
+    }
+
+
     query =
       query.eq(
         "action",
@@ -1753,9 +853,56 @@ export async function getAllUserHistory(
   }
 
 
+  const search =
+    cleanString(
+      options?.search
+    );
+
+
+  if (
+    search
+  ) {
+    query =
+      query.ilike(
+        "description",
+        `%${search}%`
+      );
+  }
+
+
+  if (
+    options?.from
+  ) {
+    query =
+      query.gte(
+        "created_at",
+        options.from
+      );
+  }
+
+
+  if (
+    options?.to
+  ) {
+    query =
+      query.lte(
+        "created_at",
+        options.to
+      );
+  }
+
+
+  query =
+    query.range(
+      offset,
+      offset +
+        limit -
+        1
+    );
+
+
   const {
     data,
-    count,
     error,
   } =
     await query;
@@ -1767,7 +914,193 @@ export async function getAllUserHistory(
 
       data: [],
 
-      total: 0,
+      error:
+        error.message,
+    };
+  }
+
+
+  return {
+    success: true,
+
+    data:
+      (data ??
+        []) as History[],
+  };
+}
+
+
+/**
+ * =========================================================
+ * GET ADMIN HISTORY
+ * =========================================================
+ *
+ * HANYA DEVELOPER.
+ *
+ * =========================================================
+ */
+
+export async function getAdminHistory(
+  options?: {
+    userId?:
+      | string;
+
+    action?:
+      | HistoryAction;
+
+    search?: string;
+
+    limit?: number;
+
+    offset?: number;
+
+    from?:
+      | string;
+
+    to?:
+      | string;
+  }
+) {
+  const context =
+    await requireAdmin();
+
+
+  if (
+    !canViewAdminHistory(
+      context.role
+    )
+  ) {
+    return {
+      success: false,
+
+      data: [],
+
+      error:
+        "Hanya developer yang dapat melihat history admin.",
+    };
+  }
+
+
+  const limit =
+    Math.min(
+      Math.max(
+        options?.limit ??
+          100,
+        1
+      ),
+      200
+    );
+
+
+  const offset =
+    Math.max(
+      options?.offset ??
+        0,
+      0
+    );
+
+
+  let query =
+    supabaseAdmin
+      .from("history")
+      .select(
+        HISTORY_SELECT
+      )
+      .eq(
+        "role",
+        "admin"
+      )
+      .order(
+        "created_at",
+        {
+          ascending:
+            false,
+        }
+      );
+
+
+  if (
+    options?.userId
+  ) {
+    query =
+      query.eq(
+        "user_id",
+        options.userId
+      );
+  }
+
+
+  if (
+    options?.action
+  ) {
+    query =
+      query.eq(
+        "action",
+        options.action
+      );
+  }
+
+
+  const search =
+    cleanString(
+      options?.search
+    );
+
+
+  if (
+    search
+  ) {
+    query =
+      query.ilike(
+        "description",
+        `%${search}%`
+      );
+  }
+
+
+  if (
+    options?.from
+  ) {
+    query =
+      query.gte(
+        "created_at",
+        options.from
+      );
+  }
+
+
+  if (
+    options?.to
+  ) {
+    query =
+      query.lte(
+        "created_at",
+        options.to
+      );
+  }
+
+
+  query =
+    query.range(
+      offset,
+      offset +
+        limit -
+        1
+    );
+
+
+  const {
+    data,
+    error,
+  } =
+    await query;
+
+
+  if (error) {
+    return {
+      success: false,
+
+      data: [],
 
       error:
         error.message,
@@ -1779,125 +1112,91 @@ export async function getAllUserHistory(
     success: true,
 
     data:
-      data ?? [],
-
-    total:
-      count ?? 0,
-
-    page,
-
-    limit,
+      (data ??
+        []) as History[],
   };
 }
 
 
 /**
  * =========================================================
- * GET DEVELOPER FULL HISTORY
+ * GET DEVELOPER HISTORY
  * =========================================================
  *
- * Hanya developer.
+ * HANYA DEVELOPER.
  *
- * Bisa melihat:
- *
- * - user
- * - admin
- *
- * Namun tetap TIDAK menampilkan password/token.
- * Metadata sudah disanitasi ketika disimpan.
+ * =========================================================
  */
+
 export async function getDeveloperHistory(
   options?: {
-    page?: number;
+    userId?:
+      | string;
+
+    action?:
+      | HistoryAction;
+
+    search?: string;
 
     limit?: number;
 
-    role?:
-      | HistoryActorRole
-      | null;
+    offset?: number;
 
-    action?:
-      | HistoryAction
-      | null;
+    from?:
+      | string;
 
-    entityType?:
-      | HistoryEntityType
-      | null;
+    to?:
+      | string;
   }
 ) {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      success: false,
-
-      data: [],
-
-      total: 0,
-
-      error:
-        "Belum login.",
-    };
-  }
+  const context =
+    await requireAdmin();
 
 
   if (
-    profile.role !==
-    "developer"
+    !canViewDeveloperHistory(
+      context.role
+    )
   ) {
     return {
       success: false,
 
       data: [],
 
-      total: 0,
-
       error:
-        "Hanya developer yang dapat mengakses history penuh.",
+        "Anda tidak memiliki akses ke history developer.",
     };
   }
 
 
-  const page =
-    Math.max(
-      1,
-      options?.page ??
-        1
-    );
-
-
   const limit =
     Math.min(
-      100,
       Math.max(
-        1,
         options?.limit ??
-          50
-      )
+          100,
+        1
+      ),
+      200
     );
 
 
-  const from =
-    (page - 1) *
-    limit;
-
-  const to =
-    from +
-    limit -
-    1;
+  const offset =
+    Math.max(
+      options?.offset ??
+        0,
+      0
+    );
 
 
   let query =
     supabaseAdmin
       .from("history")
       .select(
-        "*",
-        {
-          count:
-            "exact",
-        }
+        HISTORY_SELECT
+      )
+      .eq(
+        "role",
+        "developer"
       )
       .order(
         "created_at",
@@ -1905,31 +1204,277 @@ export async function getDeveloperHistory(
           ascending:
             false,
         }
+      );
+
+
+  if (
+    options?.userId
+  ) {
+    query =
+      query.eq(
+        "user_id",
+        options.userId
+      );
+  }
+
+
+  if (
+    options?.action
+  ) {
+    query =
+      query.eq(
+        "action",
+        options.action
+      );
+  }
+
+
+  const search =
+    cleanString(
+      options?.search
+    );
+
+
+  if (
+    search
+  ) {
+    query =
+      query.ilike(
+        "description",
+        `%${search}%`
+      );
+  }
+
+
+  if (
+    options?.from
+  ) {
+    query =
+      query.gte(
+        "created_at",
+        options.from
+      );
+  }
+
+
+  if (
+    options?.to
+  ) {
+    query =
+      query.lte(
+        "created_at",
+        options.to
+      );
+  }
+
+
+  query =
+    query.range(
+      offset,
+      offset +
+        limit -
+        1
+    );
+
+
+  const {
+    data,
+    error,
+  } =
+    await query;
+
+
+  if (error) {
+    return {
+      success: false,
+
+      data: [],
+
+      error:
+        error.message,
+    };
+  }
+
+
+  return {
+    success: true,
+
+    data:
+      (data ??
+        []) as History[],
+  };
+}
+
+
+/**
+ * =========================================================
+ * GET ALL HISTORY
+ * =========================================================
+ *
+ * Developer:
+ *   user + admin + developer
+ *
+ * Admin:
+ *   user + admin
+ *
+ * User:
+ *   ditolak.
+ *
+ * =========================================================
+ */
+
+export async function getAllHistory(
+  options?: {
+    role?:
+      | HistoryRole;
+
+    userId?:
+      | string;
+
+    action?:
+      | HistoryAction;
+
+    search?: string;
+
+    limit?: number;
+
+    offset?: number;
+
+    from?:
+      | string;
+
+    to?:
+      | string;
+  }
+) {
+  const context =
+    await requireAdmin();
+
+
+  if (
+    !canViewAllHistory(
+      context.role
+    )
+  ) {
+    return {
+      success: false,
+
+      data: [],
+
+      error:
+        "Anda tidak memiliki akses.",
+    };
+  }
+
+
+  const limit =
+    Math.min(
+      Math.max(
+        options?.limit ??
+          100,
+        1
+      ),
+      200
+    );
+
+
+  const offset =
+    Math.max(
+      options?.offset ??
+        0,
+      0
+    );
+
+
+  let query =
+    supabaseAdmin
+      .from("history")
+      .select(
+        HISTORY_SELECT
       )
-      .range(
-        from,
-        to
+      .order(
+        "created_at",
+        {
+          ascending:
+            false,
+        }
       );
 
 
   /**
-   * Developer tetap tidak perlu melihat aktivitas
-   * developer lain.
+   * ADMIN:
+   * hanya user + admin.
+   *
+   * DEVELOPER:
+   * semua.
    */
-  query =
-    query.neq(
-      "actor_role",
-      "developer"
-    );
+
+  if (
+    context.role ===
+    "admin"
+  ) {
+    query =
+      query.in(
+        "role",
+        [
+          "user",
+          "admin",
+        ]
+      );
+  }
 
 
   if (
     options?.role
   ) {
+    if (
+      !isHistoryRole(
+        options.role
+      )
+    ) {
+      return {
+        success: false,
+
+        data: [],
+
+        error:
+          "Role history tidak valid.",
+      };
+    }
+
+
+    if (
+      context.role ===
+        "admin" &&
+      options.role ===
+        "developer"
+    ) {
+      return {
+        success: false,
+
+        data: [],
+
+        error:
+          "Admin tidak dapat melihat history developer.",
+      };
+    }
+
+
     query =
       query.eq(
-        "actor_role",
+        "role",
         options.role
+      );
+  }
+
+
+  if (
+    options?.userId
+  ) {
+    query =
+      query.eq(
+        "user_id",
+        options.userId
       );
   }
 
@@ -1937,6 +1482,22 @@ export async function getDeveloperHistory(
   if (
     options?.action
   ) {
+    if (
+      !isHistoryAction(
+        options.action
+      )
+    ) {
+      return {
+        success: false,
+
+        data: [],
+
+        error:
+          "Jenis aktivitas tidak valid.",
+      };
+    }
+
+
     query =
       query.eq(
         "action",
@@ -1945,20 +1506,56 @@ export async function getDeveloperHistory(
   }
 
 
+  const search =
+    cleanString(
+      options?.search
+    );
+
+
   if (
-    options?.entityType
+    search
   ) {
     query =
-      query.eq(
-        "entity_type",
-        options.entityType
+      query.ilike(
+        "description",
+        `%${search}%`
       );
   }
 
 
+  if (
+    options?.from
+  ) {
+    query =
+      query.gte(
+        "created_at",
+        options.from
+      );
+  }
+
+
+  if (
+    options?.to
+  ) {
+    query =
+      query.lte(
+        "created_at",
+        options.to
+      );
+  }
+
+
+  query =
+    query.range(
+      offset,
+      offset +
+        limit -
+        1
+    );
+
+
   const {
     data,
-    count,
     error,
   } =
     await query;
@@ -1970,8 +1567,6 @@ export async function getDeveloperHistory(
 
       data: [],
 
-      total: 0,
-
       error:
         error.message,
     };
@@ -1982,76 +1577,196 @@ export async function getDeveloperHistory(
     success: true,
 
     data:
-      data ?? [],
-
-    total:
-      count ?? 0,
-
-    page,
-
-    limit,
+      (data ??
+        []) as History[],
   };
 }
 
 
 /**
  * =========================================================
- * DELETE HISTORY
+ * GET HISTORY BY ID
  * =========================================================
- *
- * Tidak digunakan oleh user/admin biasa.
- *
- * Untuk menjaga audit trail, sebaiknya history
- * TIDAK dihapus sembarangan.
- *
- * Hanya developer yang dapat menghapus history
- * apabila memang dibutuhkan.
  */
-export async function deleteHistory(
+
+export async function getHistoryById(
   historyId: string
 ) {
-  const profile =
-    await getAuthProfile();
-
-
-  if (!profile) {
-    return {
-      success: false,
-
-      error:
-        "Belum login.",
-    };
-  }
-
-
-  if (
-    profile.role !==
-    "developer"
-  ) {
-    return {
-      success: false,
-
-      error:
-        "Hanya developer yang dapat menghapus history.",
-    };
-  }
+  const context =
+    await requireAuth();
 
 
   const {
+    data,
     error,
   } =
     await supabaseAdmin
       .from("history")
-      .delete()
+      .select(
+        HISTORY_SELECT
+      )
       .eq(
         "id",
         historyId
-      );
+      )
+      .maybeSingle();
 
 
   if (error) {
     return {
       success: false,
+
+      data: null,
+
+      error:
+        error.message,
+    };
+  }
+
+
+  if (!data) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "History tidak ditemukan.",
+    };
+  }
+
+
+  const history =
+    data as History;
+
+
+  /**
+   * User:
+   * hanya history miliknya.
+   */
+
+  if (
+    context.role ===
+    "user"
+  ) {
+    if (
+      history.user_id !==
+      context.userId
+    ) {
+      return {
+        success: false,
+
+        data: null,
+
+        error:
+          "Anda tidak memiliki akses.",
+      };
+    }
+  }
+
+
+  /**
+   * Admin:
+   * tidak dapat melihat developer.
+   */
+
+  if (
+    context.role ===
+      "admin" &&
+    history.role ===
+      "developer"
+  ) {
+    return {
+      success: false,
+
+      data: null,
+
+      error:
+        "Admin tidak dapat melihat history developer.",
+    };
+  }
+
+
+  return {
+    success: true,
+
+    data:
+      history,
+  };
+}
+
+
+/**
+ * =========================================================
+ * DELETE OLD HISTORY
+ * =========================================================
+ *
+ * Hanya developer.
+ *
+ * Digunakan untuk maintenance database
+ * agar tabel history tidak terus membesar.
+ *
+ * =========================================================
+ */
+
+export async function deleteHistoryOlderThan(
+  date: string
+) {
+  const context =
+    await requireAdmin();
+
+
+  if (
+    context.role !==
+    "developer"
+  ) {
+    return {
+      success: false,
+
+      deleted:
+        0,
+
+      error:
+        "Hanya developer yang dapat melakukan maintenance history.",
+    };
+  }
+
+
+  if (
+    !date
+  ) {
+    return {
+      success: false,
+
+      deleted:
+        0,
+
+      error:
+        "Tanggal wajib diisi.",
+    };
+  }
+
+
+  const {
+    data,
+    error,
+  } =
+    await supabaseAdmin
+      .from("history")
+      .delete()
+      .lt(
+        "created_at",
+        date
+      )
+      .select("id");
+
+
+  if (error) {
+    return {
+      success: false,
+
+      deleted:
+        0,
 
       error:
         error.message,
@@ -2061,5 +1776,299 @@ export async function deleteHistory(
 
   return {
     success: true,
+
+    deleted:
+      data?.length ??
+      0,
   };
+}
+
+
+/**
+ * =========================================================
+ * HISTORY SHORTCUTS
+ * =========================================================
+ */
+
+export async function logLogin(
+  metadata?: Record<string, unknown>
+) {
+  return createMyHistory({
+    action:
+      "login",
+
+    description:
+      "User berhasil login.",
+
+    metadata,
+  });
+}
+
+
+export async function logLogout(
+  metadata?: Record<string, unknown>
+) {
+  return createMyHistory({
+    action:
+      "logout",
+
+    description:
+      "User logout.",
+
+    metadata,
+  });
+}
+
+
+export async function logLoginFailed(
+  description =
+    "Percobaan login gagal.",
+  metadata?:
+    Record<string, unknown>
+) {
+  return createHistory({
+    action:
+      "login_failed",
+
+    description,
+
+    metadata,
+  });
+}
+
+
+export async function logBookView(
+  bookId: string,
+  bookTitle?: string
+) {
+  return createMyHistory({
+    action:
+      "book_view",
+
+    description:
+      bookTitle
+        ? `Membuka buku "${bookTitle}".`
+        : "Membuka buku.",
+
+    targetType:
+      "book",
+
+    targetId:
+      bookId,
+  });
+}
+
+
+export async function logBookDownload(
+  bookId: string,
+  bookTitle?: string
+) {
+  return createMyHistory({
+    action:
+      "book_download",
+
+    description:
+      bookTitle
+        ? `Mendownload buku "${bookTitle}".`
+        : "Mendownload buku.",
+
+    targetType:
+      "book",
+
+    targetId:
+      bookId,
+  });
+}
+
+
+/**
+ * =========================================================
+ * BOOK ADMIN SHORTCUTS
+ * =========================================================
+ */
+
+export async function logBookCreate(
+  bookId: string,
+  title: string
+) {
+  return createMyHistory({
+    action:
+      "book_create",
+
+    description:
+      `Membuat buku "${title}".`,
+
+    targetType:
+      "book",
+
+    targetId:
+      bookId,
+  });
+}
+
+
+export async function logBookUpdate(
+  bookId: string,
+  title: string
+) {
+  return createMyHistory({
+    action:
+      "book_update",
+
+    description:
+      `Mengubah buku "${title}".`,
+
+    targetType:
+      "book",
+
+    targetId:
+      bookId,
+  });
+}
+
+
+export async function logBookUpload(
+  bookId: string,
+  title: string
+) {
+  return createMyHistory({
+    action:
+      "book_upload",
+
+    description:
+      `Mengupload PDF buku "${title}".`,
+
+    targetType:
+      "book",
+
+    targetId:
+      bookId,
+  });
+}
+
+
+export async function logBookReplace(
+  bookId: string,
+  title: string
+) {
+  return createMyHistory({
+    action:
+      "book_replace",
+
+    description:
+      `Mengganti PDF buku "${title}".`,
+
+    targetType:
+      "book",
+
+    targetId:
+      bookId,
+  });
+}
+
+
+export async function logBookDelete(
+  bookId: string,
+  title: string
+) {
+  return createMyHistory({
+    action:
+      "book_delete",
+
+    description:
+      `Menghapus buku "${title}".`,
+
+    targetType:
+      "book",
+
+    targetId:
+      bookId,
+  });
+}
+
+
+/**
+ * =========================================================
+ * REPORT SHORTCUTS
+ * =========================================================
+ */
+
+export async function logReportCreate(
+  reportId: string,
+  subject: string
+) {
+  return createMyHistory({
+    action:
+      "report_create",
+
+    description:
+      `Membuat laporan "${subject}".`,
+
+    targetType:
+      "report",
+
+    targetId:
+      reportId,
+  });
+}
+
+
+export async function logReportUpdate(
+  reportId: string,
+  status: string
+) {
+  return createMyHistory({
+    action:
+      "report_update",
+
+    description:
+      `Mengubah status laporan menjadi "${status}".`,
+
+    targetType:
+      "report",
+
+    targetId:
+      reportId,
+  });
+}
+
+
+export async function logReportDelete(
+  reportId: string
+) {
+  return createMyHistory({
+    action:
+      "report_delete",
+
+    description:
+      "Menghapus laporan.",
+
+    targetType:
+      "report",
+
+    targetId:
+      reportId,
+  });
+}
+
+
+/**
+ * =========================================================
+ * SYSTEM HISTORY
+ * =========================================================
+ */
+
+export async function logSystemEvent(
+  description: string,
+  metadata?:
+    Record<string, unknown>
+) {
+  return createHistory({
+    action:
+      "system",
+
+    description,
+
+    metadata,
+  });
 }
